@@ -1,0 +1,45 @@
+# Downloaded datasets and archives. Keep class lists and mappings in configs/.
+data/
+datasets/
+downloads/
+[Ii]mage[Nn]et*.tar*
+[Ii]mage[Nn]et*.zip
+ILSVRC*.tar*
+
+# Raw run artifacts; selected summaries and figures belong in reports/.
+# Each run uses runs/RUN_ID/{logs,curves,checkpoints}/.
+runs/
+output_dir/
+output_folder/
+logs/
+curves/
+checkpoints/
+feature_cache/
+feature_caches/
+*.pth
+*.pt
+*.ckpt
+*.safetensors
+
+# Python caches and local virtual environments.
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+env/
+
+# Local credentials and machine-specific settings; keep example templates.
+.env
+.env.*
+!.env.example
+!.env.template
+.aws/
+.ssh/
+.netrc
+credentials/
+secrets/
+*.pem
+*.key
