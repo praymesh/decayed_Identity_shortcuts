@@ -1,0 +1,24 @@
+{
+  "source_commit": "59a7f06",
+  "teammate_result_verified": false,
+  "missing": ["training command", "evaluation command and result", "100-class list and split", "dataset source/version"],
+  "repository_example_only": {
+    "dataset": "ImageNet-1K",
+    "model": "mae_vit_base_patch16",
+    "min_decay": 0.7,
+    "mask_ratio": 0.75,
+    "norm_pix_loss": true,
+    "epochs": 800,
+    "warmup_epochs": 40,
+    "blr": 0.00015,
+    "weight_decay": 0.05,
+    "batch_size_per_gpu": 256,
+    "accum_iter": 4,
+    "gpus": 8
+  },
+  "evaluation_paths": {
+    "custom_MAE_probe": "Final unnormalised encoder output averaged over all tokens including CLS; 200-epoch AdamW classifier; fixed Resize(256)/CenterCrop(224).",
+    "main_linprobe": "Separate models_vit encoder; CLS by default or mean patch pooling with --global_pool; does not carry MAE shortcut decay."
+  },
+  "comparison_status": "New runs are exploratory until the teammate settings and data are verified."
+}

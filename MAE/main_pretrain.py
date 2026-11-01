@@ -10,6 +10,10 @@
 # --------------------------------------------------------
 import argparse
 import datetime
+import hashlib
+import random
+import signal
+from collections import Counter
 import numpy as np
 import os
 import time
@@ -29,10 +33,11 @@ from util.misc import NativeScalerWithGradNormCount as NativeScaler
 
 import models_mae
 
-from engine_pretrain import train_one_epoch
+from engine_pretrain import train_one_epoch, evaluate
+from util.run_log import RunLog
 
 def get_args_parser():
-    parser = argparse.ArgumentParser('MAE pre-training', add_help=False)
+    parser = argparse.ArgumentParser('MAE pre-training')
     parser.add_argument('--batch_size', default=64, type=int,
                         help='Batch size per GPU (effective batch size is batch_size * accum_iter * # gpus')
     parser.add_argument('--epochs', default=400, type=int)
@@ -47,11 +52,23 @@ def get_args_parser():
                         help='images input size')
     parser.add_argument('--min_decay', default=1.0, type=float,
                         help='minimum decay rate for the skip connection')
+    parser.add_argument('--beta', default=0.0, type=float)
+    parser.add_argument('--memory_budget_gib', default=7.0, type=float)
+    parser.add_argument('--synthetic_samples', default=0, type=int,
+                        help='Synthetic smoke check only; never an ImageNet result')
+    parser.add_argument('--val_path', default='', type=str)
+    parser.add_argument('--class_list', default='', type=str,
+                        help='Agreed list of 100 synset IDs, one per line')
+    parser.add_argument('--dataset_id', default='', type=str,
+                        help='Dataset source and version/revision')
+    parser.add_argument('--val_seed', default=12345, type=int)
+    parser.add_argument('--val_samples', default=0, type=int,
+                        help='Deterministic validation subset; zero uses all images')
     # mixed precision
     parser.add_argument('--temp5', default=1.0, type=float,
                         help='parameter_5')
-    parser.add_argument('--eval_epochs_interval', default=-1, type=int,
-                        help='parameter_5')
+    parser.add_argument('--eval_epochs_interval', default=5, type=int,
+                        help='MAE validation interval; also validates the final epoch')
     parser.add_argument('--mask_ratio', default=0.75, type=float,
                         help='Masking ratio (percentage of removed patches).')
 
@@ -77,8 +94,8 @@ def get_args_parser():
     parser.add_argument('--data_path', default='/datasets01/imagenet_full_size/061417/', type=str,
                         help='dataset path')
 
-    parser.add_argument('--output_dir', default='./output_dir',
-                        help='path where to save, empty for no saving')
+    parser.add_argument('--output_dir', default=str(Path(__file__).resolve().parents[1] / 'runs'),
+                        help='Parent folder for unique runs')
     parser.add_argument('--log_dir', default='./output_dir',
                         help='path where to tensorboard log')
     parser.add_argument('--device', default='cuda',
@@ -122,24 +139,28 @@ def add_weight_decay(model, weight_decay=1e-5, skip_list=()):
         {'params': no_decay, 'weight_decay': 0.},
         {'params': decay, 'weight_decay': weight_decay}]
 
-def main(args):
-    #handle_flash_attn()
-    args.output_dir = '''{}/birdge_dataset_lr_{}_batch_size_{}_min_decay_{}'''.replace('\n',' ').replace(' ','').format(
-                        args.log_dir, args.blr, args.batch_size, args.min_decay)
-    misc.init_distributed_mode(args)
-
-    if misc.is_main_process():
-        if not os.path.exists(args.output_dir):
-            os.system('mkdir -p {}'.format(args.output_dir))
+def run_training(args, log_writer):
+    args.output_dir = str(log_writer.root / 'checkpoints')
+    args.log_dir = str(log_writer.root / 'logs')
     print('job dir: {}'.format(os.path.dirname(os.path.realpath(__file__))))
     print("{}".format(args).replace(', ', ',\n'))
 
     device = torch.device(args.device)
+    if device.type != 'cuda' and args.temp5 == 1:
+        raise ValueError('Use --temp5 0 for CPU checks')
+    if device.type == 'cuda':
+        total_memory = torch.cuda.get_device_properties(device).total_memory
+        fraction = args.memory_budget_gib * 2**30 / total_memory
+        if not 0 < fraction <= 1:
+            raise ValueError('Memory budget must fit on the actual GPU')
+        torch.cuda.set_per_process_memory_fraction(fraction, device)
+        torch.cuda.reset_peak_memory_stats(device)
 
     # fix the seed for reproducibility
     seed = args.seed + misc.get_rank()
     torch.manual_seed(seed)
     np.random.seed(seed)
+    random.seed(seed)
 
     cudnn.benchmark = True
 
@@ -149,7 +170,42 @@ def main(args):
             transforms.RandomHorizontalFlip(),
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])])
-    dataset_train = datasets.ImageFolder(args.data_path, transform=transform_train)
+    transform_val = transforms.Compose([
+        transforms.Resize(256, interpolation=3), transforms.CenterCrop(args.input_size),
+        transforms.ToTensor(),
+        transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])])
+    if args.synthetic_samples:
+        dataset_train = datasets.FakeData(args.synthetic_samples, (3, args.input_size, args.input_size),
+                                          num_classes=100, transform=transform_train, random_offset=0)
+        dataset_val = datasets.FakeData(8, (3, args.input_size, args.input_size),
+                                       num_classes=100, transform=transform_val, random_offset=1000000)
+        dataset_record = dict(kind='SYNTHETIC_SMOKE_ONLY', train_images=len(dataset_train),
+                              validation_images=len(dataset_val), subset=True)
+    else:
+        if not args.class_list or not args.dataset_id:
+            raise ValueError('Real runs require --class_list and --dataset_id; no implicit class subset')
+        classes = sorted(Path(args.class_list).read_text().split())
+        if len(classes) != 100 or len(set(classes)) != 100:
+            raise ValueError('Class list must contain exactly 100 unique synset IDs')
+        dataset_train = datasets.ImageFolder(args.data_path, transform=transform_train)
+        val_path = args.val_path or str(Path(args.data_path).resolve().parent / 'val')
+        dataset_val = datasets.ImageFolder(val_path, transform=transform_val)
+        if dataset_train.classes != classes or dataset_val.class_to_idx != dataset_train.class_to_idx:
+            raise ValueError('Train/validation class sets and label mappings must match the agreed list')
+        dataset_record = dict(kind='ImageNet-100', version=args.dataset_id,
+                              class_to_idx=dataset_train.class_to_idx,
+                              train_counts=dict(Counter(dataset_train.targets)),
+                              validation_counts=dict(Counter(dataset_val.targets)),
+                              train_images=len(dataset_train), validation_images=len(dataset_val),
+                              class_list_sha256=hashlib.sha256(Path(args.class_list).read_bytes()).hexdigest(),
+                              subset=bool(args.val_samples))
+    if args.val_samples:
+        # Evenly spaced fixed indices avoid selecting only the first few class folders.
+        indices = np.linspace(0, len(dataset_val) - 1, min(args.val_samples, len(dataset_val)), dtype=int).tolist()
+        dataset_val = torch.utils.data.Subset(dataset_val, indices)
+        dataset_record['validation_indices'] = indices
+    args.dataset_fingerprint = hashlib.sha256(str(dataset_record).encode()).hexdigest()
+    log_writer.save_metadata(dataset=dataset_record)
     print(dataset_train)
 
     if True:  # args.distributed:
@@ -162,18 +218,24 @@ def main(args):
     else:
         sampler_train = torch.utils.data.RandomSampler(dataset_train)
 
-    log_writer = None
-
+    loader_generator = torch.Generator()
     data_loader_train = torch.utils.data.DataLoader(
         dataset_train, sampler=sampler_train,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
         pin_memory=args.pin_mem,
         drop_last=True,
-        persistent_workers = True
+        persistent_workers=False,
+        generator=loader_generator,
     )
+    if not len(data_loader_train):
+        raise ValueError('Training data is smaller than one physical batch')
+    data_loader_val = torch.utils.data.DataLoader(
+        dataset_val, batch_size=args.batch_size, num_workers=args.num_workers,
+        pin_memory=args.pin_mem, shuffle=False, generator=torch.Generator().manual_seed(args.val_seed))
 
-    model = models_mae.__dict__[args.model](norm_pix_loss=args.norm_pix_loss, min_decay = args.min_decay)
+    model = models_mae.__dict__[args.model](img_size=args.input_size, norm_pix_loss=args.norm_pix_loss,
+                                          min_decay=args.min_decay, beta=args.beta)
 
     model.to(device)
 
@@ -202,19 +264,29 @@ def main(args):
     loss_scaler = NativeScaler()
 
     misc.load_model(args=args, model_without_ddp=model_without_ddp, optimizer=optimizer, loss_scaler=loss_scaler)
+    log_writer.save_metadata(settings=vars(args).copy(), method=model_without_ddp.method_settings(),
+                             method_name=('standard' if args.min_decay == 1 else
+                                          'fixed_decay' if args.beta == 0 else 'frequency_selective'),
+                             effective_batch_size=eff_batch_size,
+                             trainable_parameters=sum(p.numel() for p in model.parameters() if p.requires_grad))
 
     print(f"Start training at {args.start_epoch} for total {args.epochs} epochs")
     start_time = time.time()
     for epoch in range(args.start_epoch, args.epochs):
         # misc.eval_model(args, epoch, model)
-        if args.distributed:
-            data_loader_train.sampler.set_epoch(epoch)
+        data_loader_train.sampler.set_epoch(epoch)
+        loader_generator.manual_seed(args.seed + epoch)
         train_stats = train_one_epoch(
             model, data_loader_train,
             optimizer, device, epoch, loss_scaler,
             log_writer=log_writer,
             args=args
         )
+        log_writer.record('train_epoch', epoch=epoch, optimizer_updates=args.optimizer_updates,
+                          mae_train_loss=train_stats['loss'], lr=train_stats['lr'])
+        if ((args.eval_epochs_interval > 0 and (epoch + 1) % args.eval_epochs_interval == 0)
+                or epoch + 1 == args.epochs):
+            evaluate(model, data_loader_val, device, args, epoch, log_writer)
         if args.output_dir and (epoch % 50 == 0 or epoch + 1 == args.epochs):
             misc.save_model(
                 args=args, model=model, model_without_ddp=model_without_ddp, optimizer=optimizer,
@@ -233,9 +305,28 @@ def main(args):
     print('Training time {}'.format(total_time_str))
 
 
+def main(args):
+    misc.init_distributed_mode(args)
+    if args.distributed:
+        raise ValueError('The logged training runner currently supports one GPU per run')
+    if args.accum_iter < 1 or args.batch_size < 1 or not 0 < args.mask_ratio < 1:
+        raise ValueError('Invalid accumulation, batch size or mask ratio')
+    args.optimizer_updates = 0
+    def interrupted(signum, frame):
+        raise KeyboardInterrupt(f'Received signal {signum}')
+    signal.signal(signal.SIGTERM, interrupted)
+    log_writer = RunLog(args.output_dir, args)
+    print(f'Run folder: {log_writer.root}')
+    try:
+        run_training(args, log_writer)
+    except BaseException as error:
+        log_writer.close('interrupted' if isinstance(error, KeyboardInterrupt) else 'failed', str(error))
+        raise
+    else:
+        log_writer.close('completed')
+
+
 if __name__ == '__main__':
     args = get_args_parser()
     args = args.parse_args()
-    if args.output_dir:
-        Path(args.output_dir).mkdir(parents=True, exist_ok=True)
     main(args)

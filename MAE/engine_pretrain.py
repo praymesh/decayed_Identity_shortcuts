@@ -34,11 +34,15 @@ def train_one_epoch(model: torch.nn.Module,
     optimizer.zero_grad()
 
     use_mixed_precision = args.temp5 == 1
+    window_loss, window_samples = 0.0, 0
+    started_update = 0
     for data_iter_step, (samples, _) in enumerate(metric_logger.log_every(data_loader, print_freq, header)):
 
         # we use a per iteration (instead of per epoch) lr scheduler
         if data_iter_step % accum_iter == 0:
             lr_sched.adjust_learning_rate(optimizer, data_iter_step / len(data_loader) + epoch, args)
+            window_size = min(accum_iter, len(data_loader) - data_iter_step)
+            started_update = data_iter_step
 
         samples = samples.to(device, non_blocking=True)
         with torch.cuda.amp.autocast(enabled = use_mixed_precision):
@@ -47,20 +51,29 @@ def train_one_epoch(model: torch.nn.Module,
 
         if not math.isfinite(loss_value):
             print("Loss is {}, stopping training".format(loss_value))
-            sys.exit(1)
+            raise FloatingPointError('Non-finite training loss')
 
-        loss /= accum_iter
+        batch_size = samples.shape[0]
+        window_loss += loss_value * batch_size
+        window_samples += batch_size
+        loss /= window_size
+        update_grad = data_iter_step - started_update + 1 == window_size
+        skipped = False
         if use_mixed_precision:
+            scale = loss_scaler.state_dict()['scale']
             loss_scaler(loss, optimizer, parameters=model.parameters(),
-                        update_grad=(data_iter_step + 1) % accum_iter == 0)
-            if (data_iter_step + 1) % accum_iter == 0:
-                optimizer.zero_grad()
+                        update_grad=update_grad)
+            if update_grad:
+                skipped = loss_scaler.state_dict()['scale'] < scale
         else:
-            optimizer.zero_grad()
             loss.backward()
-            optimizer.step()
+            if update_grad:
+                if not all(torch.isfinite(p.grad).all() for p in model.parameters() if p.grad is not None):
+                    raise FloatingPointError('Non-finite gradients')
+                optimizer.step()
 
-        torch.cuda.synchronize()
+        if device.type == 'cuda':
+            torch.cuda.synchronize()
 
         for fid, feat_norm in enumerate(enc_feat_norm_list):
             data_dict = {f'enc_feat_norm_{fid}':feat_norm}
@@ -70,14 +83,54 @@ def train_one_epoch(model: torch.nn.Module,
             data_dict = {f'dec_feat_norm_{fid}':feat_norm}
             metric_logger.update(**data_dict)
 
-        metric_logger.update(loss=loss_value)
+        metric_logger.meters['loss'].update(loss_value, n=batch_size)
 
         lr = optimizer.param_groups[0]["lr"]
         metric_logger.update(lr=lr)
 
         loss_value_reduce = misc.all_reduce_mean(loss_value)
+        if update_grad:
+            if not skipped:
+                args.optimizer_updates += 1
+            if log_writer is not None:
+                log_writer.record('skipped_update' if skipped else 'train_update', epoch=epoch,
+                                  epoch_fraction=epoch + (data_iter_step + 1) / len(data_loader),
+                                  optimizer_updates=args.optimizer_updates,
+                                  mae_train_loss=window_loss / window_samples, lr=lr,
+                                  samples=window_samples)
+            window_loss, window_samples = 0.0, 0
+            optimizer.zero_grad()
 
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()
     print("Averaged stats:", metric_logger)
     return {k: meter.global_avg for k, meter in metric_logger.meters.items()}
+
+
+@torch.no_grad()
+def evaluate(model, data_loader, device, args, epoch, log_writer):
+    """Fixed crops and masks; validation leaves training RNG and weights alone."""
+    was_training = model.training
+    total, count = 0.0, 0
+    devices = [torch.cuda.current_device()] if device.type == 'cuda' else []
+    try:
+        model.eval()
+        with torch.random.fork_rng(devices=devices):
+            torch.manual_seed(args.val_seed)
+            for samples, _ in data_loader:
+                samples = samples.to(device, non_blocking=True)
+                with torch.autocast(device_type=device.type, enabled=args.temp5 == 1):
+                    loss = model(samples, mask_ratio=args.mask_ratio)[0]
+                if not torch.isfinite(loss):
+                    raise FloatingPointError('Non-finite validation loss')
+                total += loss.item() * len(samples)
+                count += len(samples)
+        if not count:
+            raise ValueError('Validation loader is empty')
+        result = total / count
+        log_writer.record('validation', epoch=epoch, optimizer_updates=args.optimizer_updates,
+                          mae_val_loss=result, samples=count, mask_seed=args.val_seed)
+        print(f'Validation MAE loss: {result:.6f} ({count} images)')
+        return result
+    finally:
+        model.train(was_training)

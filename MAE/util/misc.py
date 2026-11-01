@@ -15,6 +15,7 @@ import numpy as np
 import datetime
 import os
 import glob
+import random
 import tqdm
 import time
 from collections import defaultdict, deque
@@ -314,9 +315,20 @@ def save_model(args, epoch, model, model_without_ddp, optimizer, loss_scaler, sa
                 'optimizer': optimizer.state_dict(),
                 'epoch': epoch,
                 'scaler': loss_scaler.state_dict(),
-                'args': args,
+                'args': vars(args).copy(),
+                'optimizer_updates': getattr(args, 'optimizer_updates', 0),
+                'rng': dict(torch=torch.get_rng_state(),
+                            cuda=torch.cuda.get_rng_state_all() if torch.cuda.is_available() else [],
+                            python=random.getstate(),
+                            numpy=[np.random.get_state()[0], np.random.get_state()[1].tolist(),
+                                   *np.random.get_state()[2:]]),
             }
-            save_on_master(to_save, checkpoint_path)
+            if hasattr(model_without_ddp, 'method_settings'):
+                to_save['method_settings'] = model_without_ddp.method_settings()
+            temporary = checkpoint_path.with_suffix('.tmp')
+            save_on_master(to_save, temporary)
+            if is_main_process():
+                temporary.replace(checkpoint_path)
     else:
         client_state = {'epoch': epoch}
         model.save_checkpoint(save_dir=args.output_dir, tag="checkpoint-{:05d}".format(epoch), client_state=client_state)
@@ -333,18 +345,41 @@ def load_model(args, model_without_ddp, optimizer, loss_scaler):
             if len(model_list) == 0:
                 print('No checkpoint found at {}'.format(args.output_dir))
                 return
-            checkpoint = torch.load(model_list[-1], map_location='cpu')
+            checkpoint = torch.load(model_list[-1], map_location='cpu', weights_only=True)
             args.resume = model_list[-1]
         else:
-            checkpoint = torch.load(args.resume, map_location='cpu')
+            checkpoint = torch.load(args.resume, map_location='cpu', weights_only=True)
+        saved_args = checkpoint.get('args', {})
+        if not isinstance(saved_args, dict):
+            saved_args = vars(saved_args)
+        if hasattr(args, 'dataset_fingerprint'):
+            for key in ('dataset_fingerprint', 'model', 'input_size', 'mask_ratio', 'norm_pix_loss',
+                        'batch_size', 'accum_iter', 'seed', 'lr', 'blr', 'warmup_epochs', 'epochs', 'weight_decay', 'temp5'):
+                if key in saved_args and saved_args[key] != getattr(args, key):
+                    raise ValueError(f'Resume setting differs: {key}; use matching settings')
+        if hasattr(model_without_ddp, 'set_method_settings'):
+            settings = checkpoint.get('method_settings', dict(
+                min_decay=saved_args.get('min_decay', 1.0), beta=0.0, local_kernel='uniform5'))
+            model_without_ddp.set_method_settings(**settings)
+            args.min_decay, args.beta = settings['min_decay'], settings['beta']
+            print('Restored shortcut settings:', settings)
         model_without_ddp.load_state_dict(checkpoint['model'])
         print("Resume checkpoint %s" % args.resume)
         if 'optimizer' in checkpoint and 'epoch' in checkpoint and not (hasattr(args, 'eval') and args.eval):
             optimizer.load_state_dict(checkpoint['optimizer'])
             args.start_epoch = checkpoint['epoch'] + 1
+            args.optimizer_updates = checkpoint.get('optimizer_updates', 0)
             if 'scaler' in checkpoint:
                 loss_scaler.load_state_dict(checkpoint['scaler'])
             print("With optim & sched!")
+            if 'rng' in checkpoint:
+                rng = checkpoint['rng']
+                torch.set_rng_state(rng['torch'])
+                if rng['cuda'] and torch.cuda.is_available():
+                    torch.cuda.set_rng_state_all(rng['cuda'])
+                random.setstate(rng['python'])
+                state = rng['numpy']
+                np.random.set_state((state[0], np.array(state[1], dtype=np.uint32), *state[2:]))
 
 
 def all_reduce_mean(x):
