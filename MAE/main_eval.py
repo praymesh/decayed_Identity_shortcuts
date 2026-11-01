@@ -8,8 +8,6 @@
 # DeiT: https://github.com/facebookresearch/deit
 # BEiT: https://github.com/microsoft/unilm/tree/master/beit
 # --------------------------------------------------------
-from sklearnex import patch_sklearn
-patch_sklearn()
 import argparse
 import numpy as np
 import os
@@ -23,7 +21,6 @@ import torchvision.datasets as datasets
 
 
 #assert timm.__version__ == "0.3.2"  # version check
-import timm.optim.optim_factory as optim_factory
 
 import util.misc as misc
 from util.misc import NativeScalerWithGradNormCount as NativeScaler
@@ -33,11 +30,14 @@ import models_mae
 
 def get_args_parser():
     parser = argparse.ArgumentParser('MAE pre-training', add_help=False)
-    parser.add_argument('--batch_size', default=64, type=int,
+    parser.add_argument('--batch_size', default=16, type=int,
                         help='Batch size per GPU (effective batch size is batch_size * accum_iter * # gpus')
     parser.add_argument('--epochs', default=400, type=int)
     parser.add_argument('--accum_iter', default=1, type=int,
                         help='Accumulate gradient iterations (for increasing the effective batch size under memory constraints)')
+
+    parser.add_argument('--probe_batch_size', default=256, type=int)
+    parser.add_argument('--probe_epochs', default=200, type=int)
 
     # Model parameters
     parser.add_argument('--model', default='mae_vit_large_patch16', type=str, metavar='MODEL',
@@ -55,6 +55,8 @@ def get_args_parser():
                         help='parameter_4')
     parser.add_argument('--temp5', default=0, type=float,
                         help='parameter_5')
+    parser.add_argument('--min_decay', default=1.0, type=float,
+                        help='minimum residual decay factor of the model being evaluated (1.0 = plain residual)')
     parser.add_argument('--mask_ratio', default=0.75, type=float,
                         help='Masking ratio (percentage of removed patches).')
 
@@ -77,7 +79,7 @@ def get_args_parser():
                         help='epochs to warmup LR')
 
     # Dataset parameters
-    parser.add_argument('--data_path', default='/datasets01/imagenet_full_size/061417/', type=str,
+    parser.add_argument('--data_path', default='/home/dse_413/ADL_Project/decayed_Identity_shortcuts/MAE/datasets/imagenet100', type=str,
                         help='dataset path')
 
     parser.add_argument('--output_dir', default='./output_dir',
@@ -87,12 +89,12 @@ def get_args_parser():
     parser.add_argument('--device', default='cuda',
                         help='device to use for training / testing')
     parser.add_argument('--seed', default=0, type=int)
-    parser.add_argument('--resume', default='',
+    parser.add_argument('--resume', default='/home/dse_413/ADL_Project/decayed_Identity_shortcuts/MAE/out_decay07/birdge_dataset_lr_0.00015_batch_size_64_min_decay_0.7/checkpoint-last.pth',
                         help='resume from checkpoint')
 
     parser.add_argument('--start_epoch', default=0, type=int, metavar='N',
                         help='start epoch')
-    parser.add_argument('--num_workers', default=10, type=int)
+    parser.add_argument('--num_workers', default=4, type=int)
     parser.add_argument('--pin_mem', action='store_true',
                         help='Pin CPU memory in DataLoader for more efficient (sometimes) transfer to GPU.')
     parser.add_argument('--eval_only', action='store_true',
@@ -113,12 +115,10 @@ def get_args_parser():
 
 
 def main(args):
-    #handle_flash_attn()
-    ckpt = args.resume.split('_')
-    args.temp1 = float(ckpt[ckpt.index('temp1')+ 1])
-    args.temp2 = float(ckpt[ckpt.index('temp2')+ 1])
-    args.temp3 = float(ckpt[ckpt.index('temp3')+ 1])
-    args.output_dir = os.path.join(*args.resume.split('/')[:-1])
+    if not args.resume:
+        raise ValueError('--resume must point to a pretrained checkpoint')
+    if min(args.batch_size, args.probe_batch_size, args.probe_epochs) < 1 or args.num_workers < 0:
+        raise ValueError('Batch sizes and probe epochs must be positive; workers must be nonnegative')
     misc.init_distributed_mode(args)
     if misc.is_main_process():
         if not os.path.exists(args.output_dir):
@@ -135,43 +135,9 @@ def main(args):
 
     cudnn.benchmark = True
 
-    # simple augmentation
-    transform_train = transforms.Compose([
-            transforms.RandomResizedCrop(args.input_size, scale=(0.2, 1.0), interpolation=3),  # 3 is bicubic
-            transforms.RandomHorizontalFlip(),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])])
-    dataset_train = datasets.ImageFolder(os.path.join(args.data_path, 'train'), transform=transform_train)
-    print(dataset_train)
-
-    if True:  # args.distributed:
-        num_tasks = misc.get_world_size()
-        global_rank = misc.get_rank()
-        sampler_train = torch.utils.data.DistributedSampler(
-            dataset_train, num_replicas=num_tasks, rank=global_rank, shuffle=True
-        )
-        print("Sampler_train = %s" % str(sampler_train))
-    else:
-        sampler_train = torch.utils.data.RandomSampler(dataset_train)
-
-    #if global_rank == 0 and args.log_dir is not None:
-    #    os.makedirs(args.log_dir, exist_ok=True)
-    #    log_writer = SummaryWriter(log_dir=args.log_dir)
-    #else:
-    log_writer = None
-
-    data_loader_train = torch.utils.data.DataLoader(
-        dataset_train, sampler=sampler_train,
-        batch_size=args.batch_size,
-        num_workers=args.num_workers,
-        pin_memory=args.pin_mem,
-        drop_last=True,
-        persistent_workers = True
-    )
-
     # define the model
     print(args.model)
-    model = models_mae.__dict__[args.model](norm_pix_loss=args.norm_pix_loss, args = args)
+    model = models_mae.__dict__[args.model](norm_pix_loss=args.norm_pix_loss, min_decay=args.min_decay)
 
     model.to(device)
 
@@ -192,16 +158,15 @@ def main(args):
     model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu], find_unused_parameters=True)
     model_without_ddp = model.module
 
-    # following timm: set wd as 0 for bias and norm layers
-    param_groups = optim_factory.add_weight_decay(model_without_ddp, args.weight_decay)
-    optimizer = torch.optim.AdamW(param_groups, lr=args.lr, betas=(0.9, 0.95))
-    #param_groups = optim_factory.add_weight_decay(model_without_ddp, args.weight_decay)
-    #optimizer = torch.optim.AdamW(model_without_ddp.parameters(), lr=args.lr, betas=(0.9, 0.95), weight_decay = args.weight_decay)
-    print(optimizer)
-    loss_scaler = NativeScaler()
-
-    misc.load_model(args=args, model_without_ddp=model_without_ddp, optimizer=optimizer, loss_scaler=loss_scaler)
-    print(f"Start training at {args.start_epoch} for total {args.epochs} epochs")
+    checkpoint = torch.load(args.resume, map_location='cpu', weights_only=False)
+    msg = model_without_ddp.load_state_dict(checkpoint['model'], strict=False)
+    encoder_missing = [key for key in msg.missing_keys
+                       if key.startswith(('patch_embed.', 'blocks.', 'pos_embed', 'cls_token'))]
+    if encoder_missing:
+        raise ValueError(f'Checkpoint is missing encoder weights: {encoder_missing}')
+    print(f'Loaded checkpoint; missing keys: {msg.missing_keys}; unexpected keys: {msg.unexpected_keys}')
+    del checkpoint
+    model_without_ddp.requires_grad_(False)
     misc.eval_model(args, args.start_epoch, model)
 
 if __name__ == '__main__':

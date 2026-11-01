@@ -333,11 +333,14 @@ def load_model(args, model_without_ddp, optimizer, loss_scaler):
             if len(model_list) == 0:
                 print('No checkpoint found at {}'.format(args.output_dir))
                 return
-            checkpoint = torch.load(model_list[-1], map_location='cpu')
+            checkpoint = torch.load(model_list[-1], map_location='cpu', weights_only=False)
             args.resume = model_list[-1]
         else:
-            checkpoint = torch.load(args.resume, map_location='cpu')
-        model_without_ddp.load_state_dict(checkpoint['model'])
+            checkpoint = torch.load(args.resume, map_location='cpu', weights_only=False)
+        # eval-only: checkpoints may be encoder-only (e.g. Meta's release), so load non-strictly and report what was skipped
+        msg = model_without_ddp.load_state_dict(checkpoint['model'], strict=not getattr(args, 'eval_only', False))
+        if getattr(args, 'eval_only', False):
+            print('missing keys: %d, unexpected keys: %s' % (len(msg.missing_keys), msg.unexpected_keys))
         print("Resume checkpoint %s" % args.resume)
         if 'optimizer' in checkpoint and 'epoch' in checkpoint and not (hasattr(args, 'eval') and args.eval):
             optimizer.load_state_dict(checkpoint['optimizer'])

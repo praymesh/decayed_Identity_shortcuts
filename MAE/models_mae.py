@@ -20,7 +20,15 @@ from util.pos_embed import get_2d_sincos_pos_embed
 from itertools import repeat
 import collections.abc
 
-from flash_attn import flash_attn_qkvpacked_func
+try:
+    from flash_attn import flash_attn_qkvpacked_func
+except ImportError:  # fall back to torch SDPA (same math, no flash-attn build needed)
+    import torch.nn.functional as F
+
+    def flash_attn_qkvpacked_func(qkv, dropout_p=0.0, softmax_scale=None):
+        q, k, v = qkv.permute(2, 0, 3, 1, 4).unbind(0)  # (B, H, N, D)
+        out = F.scaled_dot_product_attention(q, k, v, dropout_p=dropout_p, scale=softmax_scale)
+        return out.transpose(1, 2)  # (B, N, H, D)
 
 # From PyTorch internals
 def _ntuple(n):

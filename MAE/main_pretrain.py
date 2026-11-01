@@ -10,6 +10,7 @@
 # --------------------------------------------------------
 import argparse
 import datetime
+import json
 import numpy as np
 import os
 import time
@@ -20,6 +21,7 @@ import torch.backends.cudnn as cudnn
 #from torch.utils.tensorboard import SummaryWriter
 import torchvision.transforms as transforms
 import torchvision.datasets as datasets
+from tqdm import tqdm
 
 
 #assert timm.__version__ == "0.3.2"  # version check
@@ -30,6 +32,7 @@ from util.misc import NativeScalerWithGradNormCount as NativeScaler
 import models_mae
 
 from engine_pretrain import train_one_epoch
+from util.plot_log import plot_log
 
 def get_args_parser():
     parser = argparse.ArgumentParser('MAE pre-training', add_help=False)
@@ -50,8 +53,10 @@ def get_args_parser():
     # mixed precision
     parser.add_argument('--temp5', default=1.0, type=float,
                         help='parameter_5')
-    parser.add_argument('--eval_epochs_interval', default=-1, type=int,
-                        help='parameter_5')
+    parser.add_argument('--eval_epochs_interval', default=20, type=int,
+                        help='run validation every N epochs')
+    parser.add_argument('--val_path', default='', type=str,
+                        help='validation folder (default: "val" sibling of --data_path, e.g. imagenet/val)')
     parser.add_argument('--mask_ratio', default=0.75, type=float,
                         help='Masking ratio (percentage of removed patches).')
 
@@ -104,6 +109,12 @@ def get_args_parser():
     parser.add_argument('--dist_url', default='env://',
                         help='url used to set up distributed training')
 
+    # wandb (optional)
+    parser.add_argument('--wandb', action='store_true', help='log per-epoch stats to Weights & Biases')
+    parser.add_argument('--wandb_project', default='mae-decayed-identity-shortcuts', type=str)
+    parser.add_argument('--wandb_run_name', default=None, type=str,
+                        help='run name (default: basename of output_dir)')
+
     parser.add_argument('--debug', action='store_true', help='flag for running debugging experiments')
 
     return parser
@@ -121,6 +132,27 @@ def add_weight_decay(model, weight_decay=1e-5, skip_list=()):
     return [
         {'params': no_decay, 'weight_decay': 0.},
         {'params': decay, 'weight_decay': weight_decay}]
+
+@torch.no_grad()
+def evaluate(model, data_loader, device, args):
+    """Mean MAE reconstruction loss on the held-out set (fixed masking seed for comparability)."""
+    model.eval()
+    loss_sum = torch.zeros(1, device=device)
+    n_sum = torch.zeros(1, device=device)
+    with torch.random.fork_rng(devices=[device] if device.type == 'cuda' else []):
+        torch.manual_seed(args.seed)
+        for samples, _ in tqdm(data_loader, desc='Eval', dynamic_ncols=True, disable=not misc.is_main_process()):
+            samples = samples.to(device, non_blocking=True)
+            with torch.cuda.amp.autocast(enabled=args.temp5 == 1):
+                loss, _, _ = model(samples, mask_ratio=args.mask_ratio)
+            loss_sum += loss.detach().float() * samples.shape[0]
+            n_sum += samples.shape[0]
+    if args.distributed:
+        torch.distributed.all_reduce(loss_sum)
+        torch.distributed.all_reduce(n_sum)
+    model.train(True)
+    return {'val_loss': (loss_sum / n_sum).item()}
+
 
 def main(args):
     #handle_flash_attn()
@@ -173,6 +205,24 @@ def main(args):
         persistent_workers = True
     )
 
+    transform_val = transforms.Compose([
+            transforms.Resize(256, interpolation=3),
+            transforms.CenterCrop(args.input_size),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])])
+    val_path = args.val_path or os.path.join(os.path.dirname(os.path.normpath(args.data_path)), 'val')
+    dataset_val = datasets.ImageFolder(val_path, transform=transform_val)
+    print('val set: %s (%d images)' % (val_path, len(dataset_val)))
+    data_loader_val = torch.utils.data.DataLoader(
+        dataset_val,
+        sampler=torch.utils.data.DistributedSampler(
+            dataset_val, num_replicas=misc.get_world_size(), rank=misc.get_rank(), shuffle=False),
+        batch_size=args.batch_size,
+        num_workers=args.num_workers,
+        pin_memory=args.pin_mem,
+        drop_last=False,
+    )
+
     model = models_mae.__dict__[args.model](norm_pix_loss=args.norm_pix_loss, min_decay = args.min_decay)
 
     model.to(device)
@@ -190,6 +240,25 @@ def main(args):
 
     print("accumulate grad iterations: %d" % args.accum_iter)
     print("effective batch size: %d" % eff_batch_size)
+    if misc.is_main_process():
+        with open(os.path.join(args.output_dir, 'args.json'), 'w') as f:
+            json.dump({**vars(args), 'eff_batch_size': eff_batch_size}, f, indent=2, default=str)
+
+    use_wandb = args.wandb and misc.is_main_process()
+    if use_wandb:
+        import wandb
+        # persist the run id next to the checkpoints so --resume continues the same wandb run
+        id_file = os.path.join(args.output_dir, 'wandb_id.txt')
+        if os.path.exists(id_file):
+            run_id = open(id_file).read().strip()
+        else:
+            run_id = wandb.util.generate_id()
+            with open(id_file, 'w') as f:
+                f.write(run_id)
+        wandb.init(project=args.wandb_project, name=args.wandb_run_name or os.path.basename(args.output_dir),
+                   id=run_id, resume='allow', dir=args.output_dir, config={**vars(args), 'eff_batch_size': eff_batch_size})
+        wandb.define_metric('epoch')
+        wandb.define_metric('*', step_metric='epoch')
 
     if args.distributed:
         model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu], find_unused_parameters=False)
@@ -209,28 +278,48 @@ def main(args):
         # misc.eval_model(args, epoch, model)
         if args.distributed:
             data_loader_train.sampler.set_epoch(epoch)
+        epoch_start = time.time()
+        torch.cuda.reset_peak_memory_stats()
         train_stats = train_one_epoch(
             model, data_loader_train,
             optimizer, device, epoch, loss_scaler,
             log_writer=log_writer,
             args=args
         )
-        if args.output_dir and (epoch % 50 == 0 or epoch + 1 == args.epochs):
+        epoch_time = time.time() - epoch_start
+        log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},
+                     'epoch': epoch,
+                     'lr_end': optimizer.param_groups[0]['lr'],
+                     'epoch_time_s': epoch_time,
+                     'img_per_s': len(data_loader_train) * args.batch_size * misc.get_world_size() / epoch_time,
+                     'max_mem_mb': torch.cuda.max_memory_allocated() / 2**20,
+                     'elapsed_s': time.time() - start_time}
+        if (epoch + 1) % args.eval_epochs_interval == 0 or epoch + 1 == args.epochs:
+            val_stats = evaluate(model, data_loader_val, device, args)
+            log_stats.update(val_stats)
+            print('Epoch %d: %s' % (epoch, val_stats))
+        if args.output_dir and misc.is_main_process():
+            with open(os.path.join(args.output_dir, 'log.txt'), 'a') as f:
+                f.write(json.dumps(log_stats) + '\n')
+            plot_log([args.output_dir], os.path.join(args.output_dir, 'training_curves.png'))
+            if use_wandb:
+                wandb.log(log_stats)
+        if args.output_dir and ((epoch + 1) % 20 == 0 or epoch + 1 == args.epochs):
             misc.save_model(
                 args=args, model=model, model_without_ddp=model_without_ddp, optimizer=optimizer,
                 loss_scaler=loss_scaler, epoch=epoch)
 
-        if args.output_dir and (epoch % 5 == 0 or epoch + 1 == args.epochs):
+        if args.output_dir:  # last checkpoint every epoch so a crash loses at most one epoch
             misc.save_model(
                 args=args, model=model, model_without_ddp=model_without_ddp, optimizer=optimizer,
                 loss_scaler=loss_scaler, epoch=epoch, save_last = True)
 
-        log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},
-                        'epoch': epoch,}
 
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
     print('Training time {}'.format(total_time_str))
+    if use_wandb:
+        wandb.finish()
 
 
 if __name__ == '__main__':

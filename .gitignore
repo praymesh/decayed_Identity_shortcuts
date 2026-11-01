@@ -1,0 +1,28 @@
+# python
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# data, weights, run outputs (large; keep out of git)
+MAE/datasets/
+MAE/ckpts/
+MAE/runs/
+MAE/output_dir/
+MAE/out_*/
+MAE/*.log
+*.pth
+*.pt
+*.ckpt
+wandb/
+
+# misc
+MAE/index.html
+.DS_Store
+
+# checkpoints and logs anywhere in the tree
+ckpts/
+checkpoints/
+logs/
+log/
+runs/
+*.log
