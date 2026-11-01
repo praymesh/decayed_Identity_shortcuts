@@ -30,7 +30,8 @@ def sha256(path):
 
 def main():
     parser = argparse.ArgumentParser(__doc__)
-    parser.add_argument('--destination', type=Path, default=Path('/tmp/imagenet100-cmc-160'))
+    parser.add_argument('--destination', type=Path,
+                        default=Path(__file__).resolve().parents[1] / 'datasets/imagenet100-cmc-160')
     args = parser.parse_args()
     root = args.destination.resolve()
     root.mkdir(parents=True, exist_ok=True)

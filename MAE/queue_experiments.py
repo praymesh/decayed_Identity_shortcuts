@@ -16,7 +16,7 @@ def main():
     parser.add_argument('--epochs', type=int, default=200)
     parser.add_argument('--batch_size', type=int, default=256)
     parser.add_argument('--memory_budget_gib', type=float, default=30)
-    parser.add_argument('--output_dir', type=Path, default=Path('/tmp/mae-task1-runs'))
+    parser.add_argument('--output_dir', type=Path, default=Path(__file__).resolve().parents[1] / 'runs')
     parser.add_argument('--dry_run', action='store_true')
     args = parser.parse_args()
     if args.epochs < 2:
