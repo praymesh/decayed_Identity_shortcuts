@@ -20,7 +20,10 @@ from util.pos_embed import get_2d_sincos_pos_embed
 from itertools import repeat
 import collections.abc
 
-from flash_attn import flash_attn_qkvpacked_func
+try:
+    from flash_attn import flash_attn_qkvpacked_func
+except ImportError:
+    flash_attn_qkvpacked_func = None
 
 # From PyTorch internals
 def _ntuple(n):
@@ -73,7 +76,16 @@ class Attention(nn.Module):
     def forward(self, x):
         B, N, C = x.shape
         qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, -1)
-        x = flash_attn_qkvpacked_func(qkv, self.attn_drop_prob, self.scale).reshape(B, N, -1)
+        dropout = self.attn_drop_prob if self.training else 0.0
+        if (flash_attn_qkvpacked_func is not None and x.is_cuda
+                and x.dtype in (torch.float16, torch.bfloat16)
+                and torch.cuda.get_device_capability(x.device)[0] >= 8):
+            x = flash_attn_qkvpacked_func(qkv, dropout, self.scale).reshape(B, N, -1)
+        else:
+            q, k, v = qkv.permute(2, 0, 3, 1, 4).unbind(0)
+            x = F.scaled_dot_product_attention(q, k, v, dropout_p=dropout,
+                                               scale=self.scale)
+            x = x.transpose(1, 2).reshape(B, N, C)
         x = self.proj(x)
         return x
 
