@@ -66,6 +66,10 @@ def get_args_parser():
                         help='Deterministic validation subset; zero uses all images')
     parser.add_argument('--train_samples_per_class', default=0, type=int,
                         help='Exploratory balanced subset; zero uses all training images')
+    parser.add_argument('--feature_eval', action='store_true', help='Final CPU probe, KNN and depth metrics')
+    parser.add_argument('--feature_train_per_class', default=10, type=int)
+    parser.add_argument('--feature_val_samples', default=1000, type=int)
+    parser.add_argument('--probe_epochs', default=200, type=int)
     # mixed precision
     parser.add_argument('--temp5', default=1.0, type=float,
                         help='parameter_5')
@@ -318,6 +322,13 @@ def run_training(args, log_writer):
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
     print('Training time {}'.format(total_time_str))
+    if args.feature_eval:
+        if args.synthetic_samples:
+            raise ValueError('Feature evaluation requires real labelled images')
+        from evaluate_features import evaluate_features
+        evaluate_features(model_without_ddp, transform_val, device, args, log_writer, args.epochs - 1)
+    from plot_run import plot_run
+    plot_run(log_writer.root)
 
 
 def main(args):
