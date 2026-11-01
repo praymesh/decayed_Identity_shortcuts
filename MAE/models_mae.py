@@ -41,6 +41,31 @@ to_4tuple = _ntuple(4)
 to_ntuple = _ntuple
 zero_init_val = 1e-5
 
+def visible_local_average(patches, ids_keep, grid_size):
+    """5x5 average over visible neighbours, returned in the input token order."""
+    batch, tokens, channels = patches.shape
+    height, width = grid_size
+    if ids_keep is None:
+        if tokens != height * width:
+            raise ValueError('Masked tokens require their original patch positions')
+        ids_keep = torch.arange(tokens, device=patches.device).expand(batch, -1)
+    if ids_keep.shape != (batch, tokens):
+        raise ValueError('Patch positions must match the visible tokens')
+    # Average in float32 under AMP; hidden positions contain no image features.
+    with torch.autocast(device_type=patches.device.type, enabled=False):
+        values = patches.float() if patches.dtype in (torch.float16, torch.bfloat16) else patches
+        index = ids_keep.unsqueeze(-1).expand(-1, -1, channels)
+        grid = values.new_zeros(batch, height * width, channels).scatter(1, index, values)
+        visible = values.new_zeros(batch, height * width, 1).scatter(
+            1, ids_keep.unsqueeze(-1), values.new_ones(batch, tokens, 1))
+        grid = grid.transpose(1, 2).reshape(batch, channels, height, width)
+        visible = visible.transpose(1, 2).reshape(batch, 1, height, width)
+        blurred = F.avg_pool2d(grid, 5, stride=1, padding=2)
+        weight = F.avg_pool2d(visible, 5, stride=1, padding=2)
+        local = blurred / weight.clamp_min(torch.finfo(values.dtype).eps)
+        local = local.flatten(2).transpose(1, 2).gather(1, index)
+    return local.to(patches.dtype)
+
 class SkipLayer(nn.Module):
     def __init__(self, feat_dim, skip_dim):
         super().__init__()
@@ -135,9 +160,11 @@ class Block(nn.Module):
             norm_layer: nn.Module = nn.LayerNorm,
             mlp_layer: nn.Module = Mlp,
             decay = [1,1],
+            beta = 0.0,
     ) -> None:
         super().__init__()
         self.decay = decay
+        self.beta = beta
         self.norm1 = norm_layer(dim)
         self.attn = Attention(
             dim,
@@ -156,9 +183,16 @@ class Block(nn.Module):
             use_norm_layer = False
         )
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.decay[0] * x + self.attn(self.norm1(x))
-        x = self.decay[1] * x + self.mlp(self.norm2(x))
+    def shortcut(self, x, multiplier, ids_keep, grid_size):
+        if self.beta == 0 or multiplier == 1:
+            return multiplier * x
+        local = visible_local_average(x[:, 1:], ids_keep, grid_size)
+        patches = multiplier * x[:, 1:] + self.beta * (1 - multiplier) * local
+        return torch.cat([multiplier * x[:, :1], patches], dim=1)
+
+    def forward(self, x: torch.Tensor, ids_keep=None, grid_size=None) -> torch.Tensor:
+        x = self.shortcut(x, self.decay[0], ids_keep, grid_size) + self.attn(self.norm1(x))
+        x = self.shortcut(x, self.decay[1], ids_keep, grid_size) + self.mlp(self.norm2(x))
         return x
 
 class MaskedAutoencoderViT(nn.Module):
@@ -167,8 +201,13 @@ class MaskedAutoencoderViT(nn.Module):
     def __init__(self, img_size=224, patch_size=16, in_chans=3,
                  embed_dim=1024, depth=24, num_heads=16,
                  decoder_embed_dim=512, decoder_depth=8, decoder_num_heads=16,
-                 mlp_ratio=4., norm_layer=nn.LayerNorm, norm_pix_loss=False, min_decay = 1):
+                 mlp_ratio=4., norm_layer=nn.LayerNorm, norm_pix_loss=False, min_decay = 1,
+                 beta=0.0):
         super().__init__()
+        if not 0 <= min_decay <= 1 or not 0 <= beta <= 1:
+            raise ValueError('min_decay and beta must be between zero and one')
+        self.min_decay = min_decay
+        self.beta = beta
 
         # --------------------------------------------------------------------------
         # MAE encoder specifics
@@ -181,7 +220,8 @@ class MaskedAutoencoderViT(nn.Module):
         self.skip = nn.ModuleList([SkipLayer(decoder_embed_dim, embed_dim) for _ in range(self.skip_id.shape[0])])
         decay = 1 - np.linspace(0, 1, 2 * depth).reshape(-1,2) * (1 - min_decay)
         self.blocks = nn.ModuleList([
-            Block(embed_dim, num_heads, mlp_ratio, qkv_bias=True, norm_layer=norm_layer, decay = decay[i])
+            Block(embed_dim, num_heads, mlp_ratio, qkv_bias=True, norm_layer=norm_layer,
+                  decay=decay[i], beta=beta)
             for i in range(depth)])
         # --------------------------------------------------------------------------
 
@@ -205,6 +245,17 @@ class MaskedAutoencoderViT(nn.Module):
         self.norm_pix_loss = norm_pix_loss
 
         self.initialize_weights()
+
+    def method_settings(self):
+        return dict(min_decay=self.min_decay, beta=self.beta, local_kernel='uniform5')
+
+    def set_method_settings(self, min_decay=1.0, beta=0.0, local_kernel='uniform5'):
+        if local_kernel != 'uniform5' or not 0 <= min_decay <= 1 or not 0 <= beta <= 1:
+            raise ValueError('Invalid shortcut settings')
+        self.min_decay, self.beta = min_decay, beta
+        decay = 1 - np.linspace(0, 1, 2 * len(self.blocks)).reshape(-1, 2) * (1 - min_decay)
+        for block, multipliers in zip(self.blocks, decay):
+            block.decay, block.beta = multipliers, beta
 
     def initialize_weights(self):
         # initialization
@@ -314,7 +365,7 @@ class MaskedAutoencoderViT(nn.Module):
         # apply Transformer blocks
         #print('!!!!!!!!')
         for bid, blk in enumerate(self.blocks):
-            x = blk(x)
+            x = blk(x, ids_keep, self.patch_embed.grid_size)
             if bid in self.skip_id:
                 skips.append(x)
             #print(f'enc_{bid}, {x.norm(dim = -1).mean()}')
@@ -337,7 +388,7 @@ class MaskedAutoencoderViT(nn.Module):
         # apply Transformer blocks
         skips = []
         for bid, blk in enumerate(self.blocks):
-            x = blk(x)
+            x = blk(x, grid_size=self.patch_embed.grid_size)
             if bid in self.skip_id:
                 skips.append(x)
         return skips[-1:]
