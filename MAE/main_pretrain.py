@@ -64,6 +64,8 @@ def get_args_parser():
     parser.add_argument('--val_seed', default=12345, type=int)
     parser.add_argument('--val_samples', default=0, type=int,
                         help='Deterministic validation subset; zero uses all images')
+    parser.add_argument('--train_samples_per_class', default=0, type=int,
+                        help='Exploratory balanced subset; zero uses all training images')
     # mixed precision
     parser.add_argument('--temp5', default=1.0, type=float,
                         help='parameter_5')
@@ -146,6 +148,8 @@ def run_training(args, log_writer):
     print("{}".format(args).replace(', ', ',\n'))
 
     device = torch.device(args.device)
+    if device.type == 'cuda' and device.index is None:
+        device = torch.device('cuda', torch.cuda.current_device())
     if device.type != 'cuda' and args.temp5 == 1:
         raise ValueError('Use --temp5 0 for CPU checks')
     if device.type == 'cuda':
@@ -199,6 +203,17 @@ def run_training(args, log_writer):
                               train_images=len(dataset_train), validation_images=len(dataset_val),
                               class_list_sha256=hashlib.sha256(Path(args.class_list).read_bytes()).hexdigest(),
                               subset=bool(args.val_samples))
+        if args.train_samples_per_class:
+            generator = np.random.default_rng(args.seed)
+            targets = np.asarray(dataset_train.targets)
+            indices = []
+            for label in range(100):
+                candidates = np.flatnonzero(targets == label)
+                if len(candidates) < args.train_samples_per_class:
+                    raise ValueError('Requested more training images than a class contains')
+                indices.extend(generator.choice(candidates, args.train_samples_per_class, replace=False).tolist())
+            dataset_train = torch.utils.data.Subset(dataset_train, indices)
+            dataset_record.update(train_indices=indices, subset=True, used_train_images=len(indices))
     if args.val_samples:
         # Evenly spaced fixed indices avoid selecting only the first few class folders.
         indices = np.linspace(0, len(dataset_val) - 1, min(args.val_samples, len(dataset_val)), dtype=int).tolist()
@@ -292,7 +307,7 @@ def run_training(args, log_writer):
                 args=args, model=model, model_without_ddp=model_without_ddp, optimizer=optimizer,
                 loss_scaler=loss_scaler, epoch=epoch)
 
-        if args.output_dir and (epoch % 5 == 0 or epoch + 1 == args.epochs):
+        if args.output_dir:
             misc.save_model(
                 args=args, model=model, model_without_ddp=model_without_ddp, optimizer=optimizer,
                 loss_scaler=loss_scaler, epoch=epoch, save_last = True)
