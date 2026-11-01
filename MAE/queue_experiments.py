@@ -16,6 +16,7 @@ def main():
     parser.add_argument('--epochs', type=int, default=200)
     parser.add_argument('--batch_size', type=int, default=256)
     parser.add_argument('--memory_budget_gib', type=float, default=30)
+    parser.add_argument('--num_workers', type=int, default=4)
     parser.add_argument('--output_dir', type=Path, default=Path(__file__).resolve().parents[1] / 'runs')
     parser.add_argument('--dry_run', action='store_true')
     args = parser.parse_args()
@@ -35,7 +36,7 @@ def main():
               '--epochs', str(args.epochs), '--warmup_epochs', str(max(1, args.epochs // 10)),
               '--batch_size', str(args.batch_size), '--accum_iter', str(256 // args.batch_size), '--blr', '0.00015',
               '--weight_decay', '0.05', '--mask_ratio', '0.75', '--norm_pix_loss',
-              '--seed', '0', '--num_workers', '4', '--memory_budget_gib', str(args.memory_budget_gib),
+              '--seed', '0', '--num_workers', str(args.num_workers), '--memory_budget_gib', str(args.memory_budget_gib),
               '--eval_epochs_interval', '5',
               '--feature_eval', '--feature_train_per_class', '10',
               '--feature_val_samples', '1000', '--probe_epochs', '200']

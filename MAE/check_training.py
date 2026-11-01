@@ -69,6 +69,19 @@ def main():
         assert restored.method_settings() == mae.method_settings()
         torch.testing.assert_close(mae.forward_feat(images)[0], restored.forward_feat(images)[0], rtol=0, atol=0)
         print('PASS: checkpoint loader restores settings, counters and outputs')
+        last = log.root / 'checkpoints/checkpoint-last.pth'
+        numbered = last.with_name('checkpoint-00000.pth')
+        numbered.hardlink_to(last)
+        assert numbered.stat().st_ino == last.stat().st_ino
+        with torch.no_grad():
+            mae.cls_token.add_(1)
+        misc.save_model(args, 1, mae, mae, optimizer, scaler, save_last=True)
+        assert numbered.stat().st_ino != last.stat().st_ino
+        old = torch.load(numbered, weights_only=True)
+        new = torch.load(last, weights_only=True)
+        torch.testing.assert_close(old['model']['cls_token'], restored.cls_token)
+        torch.testing.assert_close(new['model']['cls_token'], mae.cls_token)
+        print('PASS: numbered checkpoint shares storage and survives replacement of last')
     except BaseException as error:
         log.close('failed', str(error))
         raise
@@ -76,6 +89,11 @@ def main():
     records = [json.loads(line) for line in (log.root / 'logs/metrics.jsonl').read_text().splitlines()]
     assert len([r for r in records if r['event'] == 'train_update']) == 2
     assert len([r for r in records if r['event'] == 'validation']) == 2
+    train_records = [json.loads(line) for line in (log.root / 'logs/train/mae.jsonl').read_text().splitlines()]
+    val_records = [json.loads(line) for line in (log.root / 'logs/validation/mae.jsonl').read_text().splitlines()]
+    assert len(train_records) == 2 and all(r['event'] == 'train_update' for r in train_records)
+    assert len(val_records) == 2 and all(r['event'] == 'validation' for r in val_records)
+    print('PASS: training and validation records are saved in separate folders')
     print('PASS: update and validation measurements saved to', log.root)
 
 

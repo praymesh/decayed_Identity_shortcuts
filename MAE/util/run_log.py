@@ -34,6 +34,12 @@ class RunLog:
         for folder in ('logs', 'curves', 'checkpoints'):
             (self.root / folder).mkdir(parents=True, exist_ok=False)
         self.events = (self.root / 'logs/metrics.jsonl').open('a', buffering=1)
+        self.separate_logs = {}
+        for name in ('train/mae', 'validation/mae', 'train/linear_probe',
+                     'validation/linear_probe', 'evaluation/features'):
+            path = self.root / 'logs' / (name + '.jsonl')
+            path.parent.mkdir(exist_ok=True)
+            self.separate_logs[name] = path.open('a', buffering=1)
         self.console = (self.root / 'logs/console.txt').open('a', buffering=1)
         self.stdout, self.stderr = sys.stdout, sys.stderr
         sys.stdout, sys.stderr = Tee(sys.stdout, self.console), Tee(sys.stderr, self.console)
@@ -71,11 +77,28 @@ class RunLog:
         if torch.cuda.is_available():
             row.update(peak_allocated_mib=torch.cuda.max_memory_allocated() / 2**20,
                        peak_reserved_mib=torch.cuda.max_memory_reserved() / 2**20)
-        self.events.write(json.dumps(row, allow_nan=False) + '\n')
+        line = json.dumps(row, allow_nan=False) + '\n'
+        self.events.write(line)
         self.events.flush()
+        destination = None
+        if event in ('train_update', 'skipped_update', 'train_epoch'):
+            destination = 'train/mae'
+        elif event == 'validation':
+            destination = 'validation/mae'
+        elif event in ('linear_probe', 'linear_probe_update'):
+            destination = 'train/linear_probe'
+        elif event == 'linear_probe_validation':
+            destination = 'validation/linear_probe'
+        elif event in ('knn', 'depth_metrics'):
+            destination = 'evaluation/features'
+        if destination:
+            self.separate_logs[destination].write(line)
+            self.separate_logs[destination].flush()
 
     def close(self, status, error=None):
         self.record('status', status=status, error=error)
         sys.stdout, sys.stderr = self.stdout, self.stderr
         self.events.close()
+        for file in self.separate_logs.values():
+            file.close()
         self.console.close()

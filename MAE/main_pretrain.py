@@ -306,15 +306,17 @@ def run_training(args, log_writer):
         if ((args.eval_epochs_interval > 0 and (epoch + 1) % args.eval_epochs_interval == 0)
                 or epoch + 1 == args.epochs):
             evaluate(model, data_loader_val, device, args, epoch, log_writer)
-        if args.output_dir and (epoch % 50 == 0 or epoch + 1 == args.epochs):
-            misc.save_model(
-                args=args, model=model, model_without_ddp=model_without_ddp, optimizer=optimizer,
-                loss_scaler=loss_scaler, epoch=epoch)
-
+            from plot_run import plot_run
+            plot_run(log_writer.root)
         if args.output_dir:
             misc.save_model(
                 args=args, model=model, model_without_ddp=model_without_ddp, optimizer=optimizer,
                 loss_scaler=loss_scaler, epoch=epoch, save_last = True)
+            if (epoch + 1) % 50 == 0 or epoch + 1 == args.epochs:
+                # A hard link preserves this epoch when the next atomic save replaces last.
+                checkpoint = Path(args.output_dir) / 'checkpoint-last.pth'
+                numbered = Path(args.output_dir) / f'checkpoint-{epoch:05d}.pth'
+                numbered.hardlink_to(checkpoint)
 
         log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},
                         'epoch': epoch,}
