@@ -50,6 +50,21 @@ def get_args_parser():
                         help='images input size')
     parser.add_argument('--min_decay', default=1.0, type=float,
                         help='minimum decay rate for the skip connection')
+    # Task 2: residual decay mode / Rank-Targeted Residual Regulation
+    parser.add_argument('--decay_mode', default='fixed', choices=['fixed', 'learnable', 'rank'],
+                        help="fixed: original schedule; learnable: learnable-decay baseline; rank: Task 2 rank-targeted feedback")
+    parser.add_argument('--rank_schedule', default='depth', choices=['const', 'depth', 'progress', 'depth_progress'],
+                        help='target effective-rank trajectory (fraction of max rank) over depth / training progress')
+    parser.add_argument('--rank_target_start', default=0.20, type=float, help='target erank fraction (of max rank) at first block / at start of training')
+    parser.add_argument('--rank_target_end', default=0.40, type=float, help='target erank fraction at last block / at end of training')
+    parser.add_argument('--rank_gain', default=0.1, type=float, help='integral gain of the decay controller')
+    parser.add_argument('--rank_max_step', default=0.005, type=float, help='max |change| of a decay per update')
+    parser.add_argument('--rank_deadband', default=0.01, type=float, help='no update if |erank - target| below this')
+    parser.add_argument('--rank_ema', default=0.9, type=float, help='EMA factor for the observed erank')
+    parser.add_argument('--rank_decay_floor', default=0.5, type=float, help='lowest decay value the controller may set')
+    parser.add_argument('--rank_interval', default=50, type=int, help='measure effective rank every N iterations')
+    parser.add_argument('--rank_warmup_epochs', default=2, type=int, help='no control during the first N epochs')
+    parser.add_argument('--rank_max_tokens', default=2048, type=int, help='tokens subsampled for the SVD')
     # mixed precision
     parser.add_argument('--temp5', default=1.0, type=float,
                         help='parameter_5')
@@ -158,6 +173,8 @@ def main(args):
     #handle_flash_attn()
     args.output_dir = '''{}/birdge_dataset_lr_{}_batch_size_{}_min_decay_{}'''.replace('\n',' ').replace(' ','').format(
                         args.log_dir, args.blr, args.batch_size, args.min_decay)
+    if args.decay_mode != 'fixed':  # keep Task 2 / learnable runs apart from the original directory naming
+        args.output_dir += '_' + args.decay_mode + ('_' + args.rank_schedule if args.decay_mode == 'rank' else '')
     misc.init_distributed_mode(args)
 
     if misc.is_main_process():
@@ -223,7 +240,7 @@ def main(args):
         drop_last=False,
     )
 
-    model = models_mae.__dict__[args.model](norm_pix_loss=args.norm_pix_loss, min_decay = args.min_decay)
+    model = models_mae.__dict__[args.model](norm_pix_loss=args.norm_pix_loss, min_decay = args.min_decay, decay_mode = args.decay_mode)
 
     model.to(device)
 
@@ -272,6 +289,14 @@ def main(args):
 
     misc.load_model(args=args, model_without_ddp=model_without_ddp, optimizer=optimizer, loss_scaler=loss_scaler)
 
+    rank_ctrl = None
+    if args.decay_mode == 'rank':
+        from util.rank_control import RankController
+        rank_ctrl = RankController(model_without_ddp, args)
+        ctrl_file = os.path.join(args.output_dir, 'rank_ctrl.pt')
+        if args.resume and os.path.exists(ctrl_file):
+            rank_ctrl.load_state_dict(torch.load(ctrl_file, map_location='cpu'))
+
     print(f"Start training at {args.start_epoch} for total {args.epochs} epochs")
     start_time = time.time()
     for epoch in range(args.start_epoch, args.epochs):
@@ -284,7 +309,7 @@ def main(args):
             model, data_loader_train,
             optimizer, device, epoch, loss_scaler,
             log_writer=log_writer,
-            args=args
+            args=args, rank_ctrl=rank_ctrl
         )
         epoch_time = time.time() - epoch_start
         log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},
@@ -304,6 +329,8 @@ def main(args):
             plot_log([args.output_dir], os.path.join(args.output_dir, 'training_curves.png'))
             if use_wandb:
                 wandb.log(log_stats)
+        if rank_ctrl is not None and misc.is_main_process():
+            torch.save(rank_ctrl.state_dict(), os.path.join(args.output_dir, 'rank_ctrl.pt'))
         if args.output_dir and ((epoch + 1) % 20 == 0 or epoch + 1 == args.epochs):
             misc.save_model(
                 args=args, model=model, model_without_ddp=model_without_ddp, optimizer=optimizer,

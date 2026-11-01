@@ -57,6 +57,8 @@ def get_args_parser():
                         help='parameter_5')
     parser.add_argument('--min_decay', default=1.0, type=float,
                         help='minimum residual decay factor of the model being evaluated (1.0 = plain residual)')
+    parser.add_argument('--decay_mode', default='fixed', choices=['fixed', 'learnable', 'rank'],
+                        help='must match the pretraining run (rank/learnable store their decays in the checkpoint)')
     parser.add_argument('--mask_ratio', default=0.75, type=float,
                         help='Masking ratio (percentage of removed patches).')
 
@@ -137,7 +139,7 @@ def main(args):
 
     # define the model
     print(args.model)
-    model = models_mae.__dict__[args.model](norm_pix_loss=args.norm_pix_loss, min_decay=args.min_decay)
+    model = models_mae.__dict__[args.model](norm_pix_loss=args.norm_pix_loss, min_decay=args.min_decay, decay_mode=args.decay_mode)
 
     model.to(device)
 
@@ -166,6 +168,8 @@ def main(args):
         raise ValueError(f'Checkpoint is missing encoder weights: {encoder_missing}')
     print(f'Loaded checkpoint; missing keys: {msg.missing_keys}; unexpected keys: {msg.unexpected_keys}')
     del checkpoint
+    if args.decay_mode == 'fixed' and any('.decay' in k for k in msg.unexpected_keys):
+        raise ValueError('Checkpoint stores per-block decays; pass --decay_mode rank (or learnable)')
     model_without_ddp.requires_grad_(False)
     misc.eval_model(args, args.start_epoch, model)
 

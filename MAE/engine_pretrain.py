@@ -26,7 +26,7 @@ def train_one_epoch(model: torch.nn.Module,
                     data_loader: Iterable, optimizer: torch.optim.Optimizer,
                     device: torch.device, epoch: int, loss_scaler,
                     log_writer=None,
-                    args=None):
+                    args=None, rank_ctrl=None):
     model.train(True)
     metric_logger = misc.MetricLogger(delimiter="  ")
     metric_logger.add_meter('lr', misc.SmoothedValue(window_size=1, fmt='{value:.6f}'))
@@ -41,7 +41,12 @@ def train_one_epoch(model: torch.nn.Module,
     norm_sums, last_loss_scale = {}, None  # feature norms go to log.txt only, not the console line
     epoch_start = time.time()
     bar = tqdm(data_loader, desc=header, dynamic_ncols=True, disable=not misc.is_main_process())
+    raw_model = getattr(model, 'module', model)
     for data_iter_step, (samples, _) in enumerate(bar):
+        # Task 2: ask the encoder to keep per-block tokens on measurement steps
+        measure = rank_ctrl is not None and rank_ctrl.should_measure(
+            epoch * len(data_loader) + data_iter_step, epoch) and (data_iter_step + 1) % accum_iter == 0
+        raw_model.rank_collect = measure
 
         # we use a per iteration (instead of per epoch) lr scheduler
         if data_iter_step % accum_iter == 0:
@@ -71,6 +76,10 @@ def train_one_epoch(model: torch.nn.Module,
 
         torch.cuda.synchronize()
 
+        if measure:  # after backward/step, so the in-place decay update never touches a live graph
+            rank_ctrl.update(raw_model, data_iter_step / len(data_loader) + epoch)
+            raw_model.rank_collect = False
+
         for prefix, norms in (('enc', enc_feat_norm_list), ('dec', dec_feat_norm_list)):
             for fid, feat_norm in enumerate(norms):
                 key = f'{prefix}_feat_norm_{fid}'
@@ -96,6 +105,8 @@ def train_one_epoch(model: torch.nn.Module,
         str(datetime.timedelta(seconds=int(time.time() - epoch_start))), torch.cuda.max_memory_allocated() / 2**30))
     stats = {k: meter.global_avg for k, meter in metric_logger.meters.items()}
     stats.update({k: (v / len(data_loader)).item() for k, v in norm_sums.items()})
+    if rank_ctrl is not None:
+        stats.update(rank_ctrl.epoch_stats())
     if last_loss_scale is not None:
         stats['loss_scale'] = last_loss_scale
     return stats

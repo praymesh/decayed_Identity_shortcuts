@@ -131,9 +131,20 @@ class Block(nn.Module):
             norm_layer: nn.Module = nn.LayerNorm,
             mlp_layer: nn.Module = Mlp,
             decay = [1,1],
+            decay_mode: str = 'fixed',
     ) -> None:
         super().__init__()
-        self.decay = decay
+        # decay_mode: 'fixed'     -> plain python floats (original method)
+        #             'learnable' -> nn.Parameter (learnable-decay baseline)
+        #             'rank'      -> non-learned buffer, rewritten by RankController (Task 2)
+        self.decay_mode = decay_mode
+        init = torch.tensor([float(decay[0]), float(decay[1])])
+        if decay_mode == 'learnable':
+            self.decay = nn.Parameter(init)
+        elif decay_mode == 'rank':
+            self.register_buffer('decay', init)
+        else:
+            self.decay = decay
         self.norm1 = norm_layer(dim)
         self.attn = Attention(
             dim,
@@ -153,8 +164,11 @@ class Block(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.decay[0] * x + self.attn(self.norm1(x))
-        x = self.decay[1] * x + self.mlp(self.norm2(x))
+        d = self.decay
+        if self.decay_mode == 'learnable':
+            d = d.clamp(0., 1.)
+        x = d[0] * x + self.attn(self.norm1(x))
+        x = d[1] * x + self.mlp(self.norm2(x))
         return x
 
 class MaskedAutoencoderViT(nn.Module):
@@ -163,8 +177,10 @@ class MaskedAutoencoderViT(nn.Module):
     def __init__(self, img_size=224, patch_size=16, in_chans=3,
                  embed_dim=1024, depth=24, num_heads=16,
                  decoder_embed_dim=512, decoder_depth=8, decoder_num_heads=16,
-                 mlp_ratio=4., norm_layer=nn.LayerNorm, norm_pix_loss=False, min_decay = 1):
+                 mlp_ratio=4., norm_layer=nn.LayerNorm, norm_pix_loss=False, min_decay = 1, decay_mode = 'fixed'):
         super().__init__()
+        self.rank_collect = False   # Task 2: when True, forward_encoder stores per-block tokens
+        self.rank_feats = []
 
         # --------------------------------------------------------------------------
         # MAE encoder specifics
@@ -177,7 +193,7 @@ class MaskedAutoencoderViT(nn.Module):
         self.skip = nn.ModuleList([SkipLayer(decoder_embed_dim, embed_dim) for _ in range(self.skip_id.shape[0])])
         decay = 1 - np.linspace(0, 1, 2 * depth).reshape(-1,2) * (1 - min_decay)
         self.blocks = nn.ModuleList([
-            Block(embed_dim, num_heads, mlp_ratio, qkv_bias=True, norm_layer=norm_layer, decay = decay[i])
+            Block(embed_dim, num_heads, mlp_ratio, qkv_bias=True, norm_layer=norm_layer, decay = decay[i], decay_mode = decay_mode)
             for i in range(depth)])
         # --------------------------------------------------------------------------
 
@@ -309,10 +325,14 @@ class MaskedAutoencoderViT(nn.Module):
         feat_list = []
         # apply Transformer blocks
         #print('!!!!!!!!')
+        if self.rank_collect:
+            self.rank_feats = []
         for bid, blk in enumerate(self.blocks):
             x = blk(x)
             if bid in self.skip_id:
                 skips.append(x)
+            if self.rank_collect:
+                self.rank_feats.append(x[:, 1:].detach())  # patch tokens, no cls
             #print(f'enc_{bid}, {x.norm(dim = -1).mean()}')
             #with torch.cuda.amp.autocast(enabled = False):
             #    print(torch.svd_lowrank(x.float())[1].mean(dim = 0).cpu().data.numpy(), x.norm(dim = 1).mean().item())
