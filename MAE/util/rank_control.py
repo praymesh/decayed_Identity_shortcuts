@@ -76,7 +76,7 @@ class RankController:
         return self.hi + (lo_t - self.hi) * frac_depth
 
     # --------------------------------------------------------------- measuring
-    def should_measure(self, step, epoch):
+    def should_measure(self, step, epoch):  # step = optimiser-step index
         return epoch >= self.warmup_epochs and step % self.interval == 0
 
     @torch.no_grad()

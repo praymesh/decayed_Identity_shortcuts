@@ -6,6 +6,7 @@
 # Re-running resumes from checkpoint-last automatically.
 set -e
 cd "$(dirname "$0")/.."
+export PATH=/home/dse_413/.conda/envs/mae/bin:$PATH   # torchrun/timm for the linear probe
 PY=${PY:-/home/dse_413/.conda/envs/mae/bin/python}
 DATA=${DATA:-./datasets/imagenet100}
 MODE=${1:?MODE required}; shift || true

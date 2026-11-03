@@ -62,7 +62,7 @@ def get_args_parser():
     parser.add_argument('--rank_deadband', default=0.01, type=float, help='no update if |erank - target| below this')
     parser.add_argument('--rank_ema', default=0.9, type=float, help='EMA factor for the observed erank')
     parser.add_argument('--rank_decay_floor', default=0.5, type=float, help='lowest decay value the controller may set')
-    parser.add_argument('--rank_interval', default=50, type=int, help='measure effective rank every N iterations')
+    parser.add_argument('--rank_interval', default=25, type=int, help='measure effective rank every N optimiser steps')
     parser.add_argument('--rank_warmup_epochs', default=2, type=int, help='no control during the first N epochs')
     parser.add_argument('--rank_max_tokens', default=2048, type=int, help='tokens subsampled for the SVD')
     # mixed precision

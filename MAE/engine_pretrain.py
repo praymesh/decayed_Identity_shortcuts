@@ -44,8 +44,9 @@ def train_one_epoch(model: torch.nn.Module,
     raw_model = getattr(model, 'module', model)
     for data_iter_step, (samples, _) in enumerate(bar):
         # Task 2: ask the encoder to keep per-block tokens on measurement steps
-        measure = rank_ctrl is not None and rank_ctrl.should_measure(
-            epoch * len(data_loader) + data_iter_step, epoch) and (data_iter_step + 1) % accum_iter == 0
+        # rank_interval counts optimiser steps (one per accum_iter batches), so every epoch gets measured
+        measure = rank_ctrl is not None and (data_iter_step + 1) % accum_iter == 0 and rank_ctrl.should_measure(
+            (epoch * len(data_loader) + data_iter_step + 1) // accum_iter, epoch)
         raw_model.rank_collect = measure
 
         # we use a per iteration (instead of per epoch) lr scheduler
