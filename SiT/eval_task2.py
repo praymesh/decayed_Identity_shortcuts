@@ -31,7 +31,7 @@ def get_args():
     p.add_argument('--t', default=0.8, type=float, help='noise level of the probe input (1 = clean)')
     p.add_argument('--data_path', default='../MAE/datasets/imagenet100')
     p.add_argument('--image_size', default=256, type=int)
-    p.add_argument('--batch_size', default=64, type=int)
+    p.add_argument('--batch_size', default=16, type=int, help='kept small so the fp32 VAE + model stay well under 8 GB')
     p.add_argument('--num_workers', default=8, type=int)
     p.add_argument('--blocks', default='', help="comma list of block ids for KNN/probe (default: every 4th + last)")
     p.add_argument('--knn_k', default=20, type=int)
@@ -50,7 +50,7 @@ def extract(model, vae, loader, blocks, dev, t, num_classes, want_rank=False, ra
     g = torch.Generator(device=dev).manual_seed(0)  # same noise for every model -> comparable
     for bi, (img, y) in enumerate(tqdm(loader, leave=False)):
         img = img.to(dev)
-        x1 = vae.encode(img).latent_dist.mean * 0.18215
+        x1 = torch.cat([vae.encode(c).latent_dist.mean for c in img.split(8)]) * 0.18215  # chunked: keeps VAE memory low
         x0 = torch.randn(x1.shape, device=dev, generator=g)
         tt = torch.full((x1.shape[0],), t, device=dev)
         xt = t * x1 + (1 - t) * x0
@@ -140,6 +140,7 @@ def main():
     res['knn_acc_best'] = max(res['knn_acc_per_block'].values())
     res['probe_acc_best'] = max(res['probe_acc_per_block'].values())
     res['eval_time_s'] = time.time() - t0
+    res['peak_gpu_mem_gib'] = torch.cuda.max_memory_allocated() / 2**30
     print(json.dumps({k: v for k, v in res.items() if k != 'decay_per_block'}, indent=1))
     if a.out:
         os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)

@@ -21,6 +21,7 @@ from copy import deepcopy
 from glob import glob
 from time import time
 import argparse
+from contextlib import nullcontext
 import json
 import logging
 import os
@@ -249,16 +250,20 @@ def main(args):
             # Task 2: ask the model to keep per-block tokens on measurement steps
             measure = rank_ctrl is not None and rank_ctrl.should_measure(train_steps + 1, epoch)
             model.module.rank_collect = measure
-            x = x.to(device)
-            y = y.to(device)
-            with torch.no_grad():
-                # Map input images to latent space + normalize latents:
-                x = vae.encode(x).latent_dist.sample().mul_(0.18215)
-            model_kwargs = dict(y=y)
-            loss_dict = transport.training_losses(model, x, model_kwargs)
-            loss = loss_dict["loss"].mean()
+            # gradient accumulation over micro-batches: same effective batch, much less GPU memory (--micro-batch)
             opt.zero_grad()
-            loss.backward()
+            xs, ys_ = x.split(args.micro_batch), y.split(args.micro_batch)
+            for mi, (xm, ym) in enumerate(zip(xs, ys_)):
+                xm, ym = xm.to(device), ym.to(device)
+                with torch.no_grad():
+                    # Map input images to latent space + normalize latents (encode in small chunks: the fp32 VAE is a memory hog)
+                    xm = torch.cat([vae.encode(c).latent_dist.sample() for c in xm.split(args.vae_chunk)]).mul_(0.18215)
+                last = mi == len(xs) - 1
+                with (nullcontext() if last else model.no_sync()):  # DDP: all-reduce only on the last micro-batch
+                    loss_dict = transport.training_losses(model, xm, dict(y=ym))
+                    loss = loss_dict["loss"].mean()
+                    (loss * xm.shape[0] / x.shape[0]).backward()
+            loss = loss.detach()  # logged loss = last micro-batch (per-step average over log_every steps)
             opt.step()
             update_ema(ema, model.module)
             if measure:  # after backward/step, so the in-place decay update never touches a live graph
@@ -283,7 +288,7 @@ def main(args):
                 avg_loss = torch.tensor(running_loss / log_steps, device=device)
                 dist.all_reduce(avg_loss, op=dist.ReduceOp.SUM)
                 avg_loss = avg_loss.item() / dist.get_world_size()
-                logger.info(f"(step={train_steps:07d}) Train Loss: {avg_loss:.4f}, Train Steps/Sec: {steps_per_sec:.2f}")
+                logger.info(f"(step={train_steps:07d}) Train Loss: {avg_loss:.4f}, Train Steps/Sec: {steps_per_sec:.2f}, Peak GPU mem: {torch.cuda.max_memory_allocated() / 2**30:.2f} GiB")
                 if args.wandb:
                     wandb_utils.log(
                         { "train loss": avg_loss, "train steps/sec": steps_per_sec },
@@ -361,6 +366,9 @@ if __name__ == "__main__":
     parser.add_argument("--sample-every", type=int, default=10_000)
     parser.add_argument("--cfg-scale", type=float, default=4.0)
     parser.add_argument("--min-sigma", type=float, default=0.8)
+    parser.add_argument("--micro-batch", type=int, default=32,
+                        help="per-GPU micro-batch for gradient accumulation (memory only; effective batch stays --global-batch-size)")
+    parser.add_argument("--vae-chunk", type=int, default=8, help="images per VAE-encode call (memory only, no effect on results)")
     parser.add_argument("--decay-mode", type=str, choices=["fixed", "learnable", "rank"], default="fixed",
                         help="fixed: original decay schedule; learnable: learnable-decay baseline; rank: Task 2 rank-targeted feedback")
     # Task 2: Rank-Targeted Residual Regulation (only used with --decay-mode rank)
