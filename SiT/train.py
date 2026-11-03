@@ -125,7 +125,8 @@ def main(args):
     experiment_index = len(glob(f"{args.results_dir}/*"))
     model_string_name = args.model.replace("/", "-")  # e.g., SiT-XL/2 --> SiT-XL-2 (for naming folders)
     experiment_name = f"{model_string_name}-" \
-                    f"{args.path_type}-{args.prediction}-{args.loss_weight}-{args.min_sigma}"
+                    f"{args.path_type}-{args.prediction}-{args.loss_weight}-{args.min_sigma}" \
+                    + ("" if args.decay_mode == 'fixed' else f"-{args.decay_mode}")
     experiment_dir = f"{args.results_dir}/{experiment_name}"  # Create an experiment folder
     checkpoint_dir = f"{experiment_dir}/checkpoints"  # Stores saved model checkpoints
     # Setup an experiment folder:
@@ -147,7 +148,8 @@ def main(args):
     model = SiT_models[args.model](
         input_size=latent_size,
         num_classes=args.num_classes,
-        min_sigma=args.min_sigma
+        min_sigma=args.min_sigma,
+        decay_mode=args.decay_mode
     )
 
     # Note that parameter initialization is done within the SiT constructor
@@ -332,6 +334,8 @@ if __name__ == "__main__":
     parser.add_argument("--sample-every", type=int, default=10_000)
     parser.add_argument("--cfg-scale", type=float, default=4.0)
     parser.add_argument("--min-sigma", type=float, default=0.8)
+    parser.add_argument("--decay-mode", type=str, choices=["fixed", "learnable"], default="fixed",
+                        help="fixed: original decay schedule; learnable: learnable-decay baseline")
     parser.add_argument("--wandb", action="store_false")
     parser.add_argument("--ckpt", type=str, default=None,
                         help="Optional path to a custom SiT checkpoint")
