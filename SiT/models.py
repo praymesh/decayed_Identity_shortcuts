@@ -11,7 +11,11 @@ import torch.nn as nn
 import numpy as np
 import math
 from timm.models.vision_transformer import PatchEmbed,  Mlp
-from flash_attn import flash_attn_qkvpacked_func, flash_attn_kvpacked_func
+import torch.nn.functional as F
+try:
+    from flash_attn import flash_attn_qkvpacked_func
+except ImportError:  # flash-attn not installed (e.g. consumer GPU): fall back to PyTorch SDPA, same math
+    flash_attn_qkvpacked_func = None
 
 class Attention(nn.Module):
     def __init__(self, dim, num_heads=8, qkv_bias=False, qk_scale=None, attn_drop=0., proj_drop=0.):
@@ -30,7 +34,12 @@ class Attention(nn.Module):
     def forward(self, x):
         B, N, C = x.shape
         qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, -1)
-        x = flash_attn_qkvpacked_func(qkv, self.attn_drop_prob, self.scale).reshape(B, N, -1)
+        if flash_attn_qkvpacked_func is not None:
+            x = flash_attn_qkvpacked_func(qkv, self.attn_drop_prob, self.scale).reshape(B, N, -1)
+        else:
+            q, k, v = qkv.permute(2, 0, 3, 1, 4)  # (B, heads, N, head_dim)
+            x = F.scaled_dot_product_attention(q, k, v, dropout_p=self.attn_drop_prob if self.training else 0., scale=self.scale)
+            x = x.transpose(1, 2).reshape(B, N, -1)
         x = self.proj(x)
         x = self.proj_drop(x)
         return x
@@ -121,9 +130,11 @@ class SiTBlock(nn.Module):
     """
     A SiT block with adaptive layer norm zero (adaLN-Zero) conditioning.
     """
-    def __init__(self, hidden_size, num_heads, mlp_ratio=4.0, skip = False, decay = [1,1], **block_kwargs):
+    def __init__(self, hidden_size, num_heads, mlp_ratio=4.0, skip = False, decay = [1,1], decay_mode = 'fixed', **block_kwargs):
         super().__init__()
-        self.decay = decay
+        # decay_mode: 'fixed' -> python floats (original method); 'learnable' -> nn.Parameter (learnable-decay baseline)
+        self.decay_mode = decay_mode
+        self.decay = nn.Parameter(torch.tensor([float(decay[0]), float(decay[1])])) if decay_mode == 'learnable' else decay
         self.norm1 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         self.attn = Attention(hidden_size, num_heads=num_heads, qkv_bias=True, **block_kwargs)
         self.norm2 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
@@ -141,8 +152,9 @@ class SiTBlock(nn.Module):
         if skip is not None:
             x = x + self.skip(skip)
         shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.adaLN_modulation(c).chunk(6, dim=1)
-        x = self.decay[0] * x + gate_msa.unsqueeze(1) * self.attn(modulate(self.norm1(x), shift_msa, scale_msa))
-        x = self.decay[1] * x + gate_mlp.unsqueeze(1) * self.mlp(modulate(self.norm2(x), shift_mlp, scale_mlp))
+        d = self.decay.clamp(0., 1.) if self.decay_mode == 'learnable' else self.decay
+        x = d[0] * x + gate_msa.unsqueeze(1) * self.attn(modulate(self.norm1(x), shift_msa, scale_msa))
+        x = d[1] * x + gate_mlp.unsqueeze(1) * self.mlp(modulate(self.norm2(x), shift_mlp, scale_mlp))
         return x
 
 
@@ -183,6 +195,7 @@ class SiT(nn.Module):
         num_classes=1000,
         min_sigma = 0.8,
         learn_sigma=True,
+        decay_mode = 'fixed',
     ):
         super().__init__()
         self.learn_sigma = learn_sigma
@@ -199,10 +212,10 @@ class SiT(nn.Module):
         self.pos_embed = nn.Parameter(torch.zeros(1, num_patches, hidden_size), requires_grad=False)
         self.sigma = np.linspace(1, min_sigma, 2 * depth).reshape(depth, -1)
         self.enc_blocks = nn.ModuleList([
-            SiTBlock(hidden_size, num_heads, mlp_ratio=mlp_ratio, decay = self.sigma[i]) for i in range(depth // 2)
+            SiTBlock(hidden_size, num_heads, mlp_ratio=mlp_ratio, decay = self.sigma[i], decay_mode = decay_mode) for i in range(depth // 2)
         ])
         self.dec_blocks = nn.ModuleList([
-            SiTBlock(hidden_size, num_heads, mlp_ratio=mlp_ratio, skip = True, decay = self.sigma[i + depth // 2]) for i in range(depth // 2)
+            SiTBlock(hidden_size, num_heads, mlp_ratio=mlp_ratio, skip = True, decay = self.sigma[i + depth // 2], decay_mode = decay_mode) for i in range(depth // 2)
         ])
         self.final_layer = FinalLayer(hidden_size, patch_size, self.out_channels)
         self.initialize_weights()
