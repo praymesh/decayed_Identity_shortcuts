@@ -45,7 +45,7 @@ cd SiT
 bash scripts/run_task2.sh fixed                      # baseline 1: original decayed shortcuts
 bash scripts/run_task2.sh learnable                  # baseline 2: learnable decay
 bash scripts/run_task2.sh rank_depth                 # Task 2 (also: rank_const rank_progress rank_depth_progress)
-# knobs: MODEL=SiT-B/2 EPOCHS=100 NGPU=1 BS=256 DATA=../MAE/datasets/imagenet100 WANDB=1; extra args go to train.py, e.g.
+# knobs: MODEL=SiT-S/2 EPOCHS=100 NGPU=1 BS=256 DATA=../MAE/datasets/imagenet100 WANDB=1; extra args go to train.py, e.g.
 bash scripts/run_task2.sh rank_depth --rank-gain 0.03 --rank-max-step 0.002 --rank-target-start 0.25 --rank-target-end 0.45
 ```
 The script trains (`results_task2/<mode>/...`, controller trace in `rank_log.jsonl`), then writes `results_task2/<mode>.json`.

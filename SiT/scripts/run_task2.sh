@@ -2,12 +2,12 @@
 # Task 2 on SiT (Rank-Targeted Residual Regulation): train + evaluate.
 # Usage:  bash scripts/run_task2.sh MODE [extra train.py args]
 #   MODE = fixed | learnable | rank_depth | rank_const | rank_progress | rank_depth_progress
-# Env knobs: MODEL (default SiT-B/2), DATA, EPOCHS, NGPU, BS (global batch), WANDB=1 to enable wandb.
+# Env knobs: MODEL (default SiT-S/2), DATA, EPOCHS, NGPU, BS (global batch), WANDB=1 to enable wandb.
 # fixed / learnable are the two baselines; the rank_* modes are Task 2.
 set -e
 cd "$(dirname "$0")/.."
 PY=${PY:-python}
-MODEL=${MODEL:-SiT-B/2}
+MODEL=${MODEL:-SiT-S/2}
 DATA=${DATA:-../MAE/datasets/imagenet100}
 EPOCHS=${EPOCHS:-100}
 NGPU=${NGPU:-1}

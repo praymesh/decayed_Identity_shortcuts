@@ -4,7 +4,7 @@ Features = mean-pooled patch tokens of a block output, computed on VAE latents n
 (SiT linear path: x_t = t*x_data + (1-t)*noise, so t=1 is clean data) with the *null* class label,
 so no label information reaches the features. Single process (no torchrun).
 
-  python eval_task2.py --ckpt results/<exp>/checkpoints/0100000.pt --model SiT-B/2 --decay_mode rank \
+  python eval_task2.py --ckpt results/<exp>/checkpoints/0100000.pt --model SiT-S/2 --decay_mode rank \
       --data_path ../MAE/datasets/imagenet100 --out results/rank_depth.json
 Works for any --decay_mode (fixed / learnable / rank), so it is also used for the two baselines.
 """
@@ -23,7 +23,7 @@ from train import center_crop_arr
 def get_args():
     p = argparse.ArgumentParser()
     p.add_argument('--ckpt', required=True)
-    p.add_argument('--model', default='SiT-B/2', choices=list(SiT_models.keys()))
+    p.add_argument('--model', default='SiT-S/2', choices=list(SiT_models.keys()))
     p.add_argument('--decay_mode', default='fixed', choices=['fixed', 'learnable', 'rank'])
     p.add_argument('--min_sigma', default=0.8, type=float, help='only used to rebuild the fixed schedule')
     p.add_argument('--num_classes', default=100, type=int, help='classes the model was trained with (null label = this index)')
