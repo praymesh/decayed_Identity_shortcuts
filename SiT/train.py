@@ -21,6 +21,7 @@ from copy import deepcopy
 from glob import glob
 from time import time
 import argparse
+import json
 import logging
 import os
 
@@ -164,6 +165,11 @@ def main(args):
         args = state_dict["args"]
 
     requires_grad(ema, False)
+    rank_ctrl = None
+    if args.decay_mode == 'rank':
+        from rank_control import RankController
+        # args uses dashes on the command line; argparse stores them with underscores (args.rank_gain, ...)
+        rank_ctrl = RankController(model, args)
     
     model = DDP(model.to(device), device_ids=[device])
     transport = create_transport(
@@ -240,6 +246,9 @@ def main(args):
         sampler.set_epoch(epoch)
         logger.info(f"Beginning epoch {epoch}...")
         for x, y in loader:
+            # Task 2: ask the model to keep per-block tokens on measurement steps
+            measure = rank_ctrl is not None and rank_ctrl.should_measure(train_steps + 1, epoch)
+            model.module.rank_collect = measure
             x = x.to(device)
             y = y.to(device)
             with torch.no_grad():
@@ -252,6 +261,14 @@ def main(args):
             loss.backward()
             opt.step()
             update_ema(ema, model.module)
+            if measure:  # after backward/step, so the in-place decay update never touches a live graph
+                rank_ctrl.update(model.module, epoch + (train_steps % len(loader)) / len(loader))
+                model.module.rank_collect = False
+                for be, bm in zip(ema.blocks, model.module.blocks):  # EMA only averages parameters; copy the decay buffers
+                    be.decay.copy_(bm.decay)
+                if rank == 0:
+                    with open(f"{experiment_dir}/rank_log.jsonl", "a") as f:
+                        f.write(json.dumps({"step": train_steps + 1, "epoch": epoch, "blocks": rank_ctrl.last}) + "\n")
 
             # Log loss values:
             running_loss += loss.item()
@@ -308,6 +325,16 @@ def main(args):
                     wandb_utils.log_image(out_samples, train_steps)
                 logging.info("Generating EMA samples done.")
 
+        if rank_ctrl is not None:  # per-epoch stability summary of the controller (full per-update trace is in rank_log.jsonl)
+            st = rank_ctrl.epoch_stats()
+            logger.info(f"[rank] epoch {epoch}: |err|={st['rank_abs_err']:.4f} |delta|={st['rank_abs_delta']:.5f} "
+                        f"ctrl_time={st['rank_ctrl_time_s']:.1f}s decay(first/last block)="
+                        f"{st['rank_decay_0']:.3f}/{st[f'rank_decay_{len(rank_ctrl.blocks) - 1}']:.3f}")
+            if args.wandb:
+                wandb_utils.log(st, step=train_steps)
+
+    if rank_ctrl is not None:
+        logger.info(f"Rank controller overhead: {rank_ctrl.total_time:.1f}s total")
     model.eval()  # important! This disables randomized embedding dropout
     # do any sampling/FID calculation/etc. with ema (or model) in eval mode ...
 
@@ -334,8 +361,21 @@ if __name__ == "__main__":
     parser.add_argument("--sample-every", type=int, default=10_000)
     parser.add_argument("--cfg-scale", type=float, default=4.0)
     parser.add_argument("--min-sigma", type=float, default=0.8)
-    parser.add_argument("--decay-mode", type=str, choices=["fixed", "learnable"], default="fixed",
-                        help="fixed: original decay schedule; learnable: learnable-decay baseline")
+    parser.add_argument("--decay-mode", type=str, choices=["fixed", "learnable", "rank"], default="fixed",
+                        help="fixed: original decay schedule; learnable: learnable-decay baseline; rank: Task 2 rank-targeted feedback")
+    # Task 2: Rank-Targeted Residual Regulation (only used with --decay-mode rank)
+    parser.add_argument("--rank-schedule", type=str, choices=["const", "depth", "progress", "depth_progress"], default="depth",
+                        help="target effective-rank trajectory (fraction of max rank) over depth / training progress")
+    parser.add_argument("--rank-target-start", type=float, default=0.20, help="target erank fraction at first block / start of training")
+    parser.add_argument("--rank-target-end", type=float, default=0.40, help="target erank fraction at last block / end of training")
+    parser.add_argument("--rank-gain", type=float, default=0.1, help="integral gain of the decay controller")
+    parser.add_argument("--rank-max-step", type=float, default=0.005, help="max |change| of a decay per update")
+    parser.add_argument("--rank-deadband", type=float, default=0.01, help="no update if |erank - target| below this")
+    parser.add_argument("--rank-ema", type=float, default=0.9, help="EMA factor for the observed erank")
+    parser.add_argument("--rank-decay-floor", type=float, default=0.5, help="lowest decay value the controller may set")
+    parser.add_argument("--rank-interval", type=int, default=100, help="measure effective rank every N optimiser steps")
+    parser.add_argument("--rank-warmup-epochs", type=int, default=0, help="no control during the first N epochs")
+    parser.add_argument("--rank-max-tokens", type=int, default=2048, help="tokens subsampled for the SVD")
     parser.add_argument("--wandb", action="store_false")
     parser.add_argument("--ckpt", type=str, default=None,
                         help="Optional path to a custom SiT checkpoint")

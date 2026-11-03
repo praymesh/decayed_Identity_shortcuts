@@ -133,8 +133,15 @@ class SiTBlock(nn.Module):
     def __init__(self, hidden_size, num_heads, mlp_ratio=4.0, skip = False, decay = [1,1], decay_mode = 'fixed', **block_kwargs):
         super().__init__()
         # decay_mode: 'fixed' -> python floats (original method); 'learnable' -> nn.Parameter (learnable-decay baseline)
+        #             'rank'  -> non-learned buffer, rewritten by RankController (Task 2)
         self.decay_mode = decay_mode
-        self.decay = nn.Parameter(torch.tensor([float(decay[0]), float(decay[1])])) if decay_mode == 'learnable' else decay
+        init = torch.tensor([float(decay[0]), float(decay[1])])
+        if decay_mode == 'learnable':
+            self.decay = nn.Parameter(init)
+        elif decay_mode == 'rank':
+            self.register_buffer('decay', init)
+        else:
+            self.decay = decay
         self.norm1 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         self.attn = Attention(hidden_size, num_heads=num_heads, qkv_bias=True, **block_kwargs)
         self.norm2 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
@@ -203,6 +210,9 @@ class SiT(nn.Module):
         self.out_channels = in_channels * 2 if learn_sigma else in_channels
         self.patch_size = patch_size
         self.num_heads = num_heads
+        self.rank_collect = False   # Task 2: when True, forward() stores per-block patch tokens
+        self.rank_feats = []
+        self.rank_n_samples = 8     # images kept per measurement (8 x 256 tokens)
 
         self.x_embedder = PatchEmbed(input_size, patch_size, in_channels, hidden_size, bias=True)
         self.t_embedder = TimestepEmbedder(hidden_size)
@@ -256,6 +266,10 @@ class SiT(nn.Module):
         nn.init.constant_(self.final_layer.linear.weight, 0)
         nn.init.constant_(self.final_layer.linear.bias, 0)
 
+    @property
+    def blocks(self):
+        return list(self.enc_blocks) + list(self.dec_blocks)
+
     def unpatchify(self, x):
         """
         x: (N, T, patch_size**2 * C)
@@ -283,11 +297,17 @@ class SiT(nn.Module):
         y = self.y_embedder(y, self.training)    # (N, D)
         c = t + y                                # (N, D)
         x_list = []
+        if self.rank_collect:
+            self.rank_feats = []
         for block in self.enc_blocks:
             x = block(x, c)                      # (N, T, D)
             x_list.append(x)
+            if self.rank_collect:
+                self.rank_feats.append(x[:self.rank_n_samples].detach())
         for block in self.dec_blocks:
             x = block(x, c, x_list.pop(-1))                      # (N, T, D)
+            if self.rank_collect:
+                self.rank_feats.append(x[:self.rank_n_samples].detach())
         x = self.final_layer(x, c)                # (N, T, patch_size ** 2 * out_channels)
         x = self.unpatchify(x)                   # (N, out_channels, H, W)
         if self.learn_sigma:
