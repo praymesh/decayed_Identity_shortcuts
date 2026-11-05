@@ -1,6 +1,7 @@
 """Synthetic checks for update counts, validation isolation and checkpoint resume."""
 import copy
 import json
+from pathlib import Path
 
 import torch
 from torch.utils.data import DataLoader, TensorDataset
@@ -95,6 +96,21 @@ def main():
     assert len(val_records) == 2 and all(r['event'] == 'validation' for r in val_records)
     print('PASS: training and validation records are saved in separate folders')
     print('PASS: update and validation measurements saved to', log.root)
+    args.optimizer_updates, args.loss_name, args.lr_schedule = 0, 'velocity', 'constant'
+    model = ToyLoss()
+    optimizer = torch.optim.SGD(model.parameters(), lr=.01)
+    callback_weights = []
+    log = RunLog(Path(__file__).resolve().parents[1] / 'runs', args, loss_name='velocity')
+    loss_fn = lambda network, samples, labels: network(samples, .75)[0]
+    train_one_epoch(model, loader, optimizer, torch.device('cpu'), 0, None, log, args,
+                    loss_fn=loss_fn, on_update=lambda: callback_weights.append(model.weight.item()))
+    evaluate(model, loader, torch.device('cpu'), args, 0, log, loss_fn=loss_fn)
+    log.close('completed')
+    assert len(callback_weights) == 2 and args.optimizer_updates == 2
+    torch.testing.assert_close(model.weight, expected.weight)
+    assert 'velocity_train_loss' in (log.root / 'logs/train/velocity.jsonl').read_text()
+    assert 'velocity_val_loss' in (log.root / 'logs/validation/velocity.jsonl').read_text()
+    print('PASS: conditional loss callback, actual-update hook, constant LR and separate velocity records')
 
 
 if __name__ == '__main__':

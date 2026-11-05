@@ -22,7 +22,7 @@ def train_one_epoch(model: torch.nn.Module,
                     data_loader: Iterable, optimizer: torch.optim.Optimizer,
                     device: torch.device, epoch: int, loss_scaler,
                     log_writer=None,
-                    args=None):
+                    args=None, loss_fn=None, on_update=None):
     model.train(True)
     metric_logger = misc.MetricLogger(delimiter="  ")
     metric_logger.add_meter('lr', misc.SmoothedValue(window_size=1, fmt='{value:.6f}'))
@@ -36,17 +36,22 @@ def train_one_epoch(model: torch.nn.Module,
     use_mixed_precision = args.temp5 == 1
     window_loss, window_samples = 0.0, 0
     started_update = 0
-    for data_iter_step, (samples, _) in enumerate(metric_logger.log_every(data_loader, print_freq, header)):
+    for data_iter_step, (samples, targets) in enumerate(metric_logger.log_every(data_loader, print_freq, header)):
 
         # we use a per iteration (instead of per epoch) lr scheduler
         if data_iter_step % accum_iter == 0:
-            lr_sched.adjust_learning_rate(optimizer, data_iter_step / len(data_loader) + epoch, args)
+            if getattr(args, 'lr_schedule', 'cosine') != 'constant':
+                lr_sched.adjust_learning_rate(optimizer, data_iter_step / len(data_loader) + epoch, args)
             window_size = min(accum_iter, len(data_loader) - data_iter_step)
             started_update = data_iter_step
 
         samples = samples.to(device, non_blocking=True)
         with torch.cuda.amp.autocast(enabled = use_mixed_precision):
-            loss, enc_feat_norm_list, dec_feat_norm_list = model(samples, mask_ratio=args.mask_ratio)
+            if loss_fn is None:
+                loss, enc_feat_norm_list, dec_feat_norm_list = model(samples, mask_ratio=args.mask_ratio)
+            else:
+                loss = loss_fn(model, samples, targets.to(device, non_blocking=True))
+                enc_feat_norm_list, dec_feat_norm_list = [], []
         loss_value = loss.item()
 
         if not math.isfinite(loss_value):
@@ -92,12 +97,14 @@ def train_one_epoch(model: torch.nn.Module,
         if update_grad:
             if not skipped:
                 args.optimizer_updates += 1
+                if on_update is not None:
+                    on_update()
             if log_writer is not None:
                 log_writer.record('skipped_update' if skipped else 'train_update', epoch=epoch,
                                   epoch_fraction=epoch + (data_iter_step + 1) / len(data_loader),
                                   optimizer_updates=args.optimizer_updates,
-                                  mae_train_loss=window_loss / window_samples, lr=lr,
-                                  samples=window_samples)
+                                  lr=lr, samples=window_samples,
+                                  **{f'{getattr(args, "loss_name", "mae")}_train_loss': window_loss / window_samples})
             window_loss, window_samples = 0.0, 0
             optimizer.zero_grad()
 
@@ -108,7 +115,7 @@ def train_one_epoch(model: torch.nn.Module,
 
 
 @torch.no_grad()
-def evaluate(model, data_loader, device, args, epoch, log_writer):
+def evaluate(model, data_loader, device, args, epoch, log_writer, loss_fn=None):
     """Fixed crops and masks; validation leaves training RNG and weights alone."""
     was_training = model.training
     total, count = 0.0, 0
@@ -117,10 +124,11 @@ def evaluate(model, data_loader, device, args, epoch, log_writer):
         model.eval()
         with torch.random.fork_rng(devices=devices):
             torch.manual_seed(args.val_seed)
-            for samples, _ in data_loader:
+            for samples, targets in data_loader:
                 samples = samples.to(device, non_blocking=True)
                 with torch.autocast(device_type=device.type, enabled=args.temp5 == 1):
-                    loss = model(samples, mask_ratio=args.mask_ratio)[0]
+                    loss = (model(samples, mask_ratio=args.mask_ratio)[0] if loss_fn is None else
+                            loss_fn(model, samples, targets.to(device, non_blocking=True)))
                 if not torch.isfinite(loss):
                     raise FloatingPointError('Non-finite validation loss')
                 total += loss.item() * len(samples)
@@ -129,8 +137,10 @@ def evaluate(model, data_loader, device, args, epoch, log_writer):
             raise ValueError('Validation loader is empty')
         result = total / count
         log_writer.record('validation', epoch=epoch, optimizer_updates=args.optimizer_updates,
-                          mae_val_loss=result, samples=count, mask_seed=args.val_seed)
-        print(f'Validation MAE loss: {result:.6f} ({count} images)')
+                          samples=count, validation_seed=args.val_seed,
+                          **({'mask_seed': args.val_seed} if loss_fn is None else {'noise_seed': args.val_seed}),
+                          **{f'{getattr(args, "loss_name", "mae")}_val_loss': result})
+        print(f'Validation {getattr(args, "loss_name", "mae")} loss: {result:.6f} ({count} images)')
         return result
     finally:
         model.train(was_training)

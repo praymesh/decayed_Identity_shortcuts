@@ -301,7 +301,7 @@ def get_grad_norm_(parameters, norm_type: float = 2.0) -> torch.Tensor:
     return total_norm
 
 
-def save_model(args, epoch, model, model_without_ddp, optimizer, loss_scaler, save_last = False):
+def save_model(args, epoch, model, model_without_ddp, optimizer, loss_scaler, save_last = False, extra_state=None):
     output_dir = Path(args.output_dir)
     epoch_name = str(epoch)
     if loss_scaler is not None:
@@ -325,6 +325,8 @@ def save_model(args, epoch, model, model_without_ddp, optimizer, loss_scaler, sa
             }
             if hasattr(model_without_ddp, 'method_settings'):
                 to_save['method_settings'] = model_without_ddp.method_settings()
+            if extra_state:
+                to_save.update(extra_state)
             temporary = checkpoint_path.with_suffix('.tmp')
             save_on_master(to_save, temporary)
             if is_main_process():
@@ -361,7 +363,9 @@ def load_model(args, model_without_ddp, optimizer, loss_scaler):
             settings = checkpoint.get('method_settings', dict(
                 min_decay=saved_args.get('min_decay', 1.0), beta=0.0, local_kernel='uniform5'))
             model_without_ddp.set_method_settings(**settings)
-            args.min_decay, args.beta = settings['min_decay'], settings['beta']
+            for key, value in settings.items():
+                if hasattr(args, key):
+                    setattr(args, key, value)
             print('Restored shortcut settings:', settings)
         model_without_ddp.load_state_dict(checkpoint['model'])
         print("Resume checkpoint %s" % args.resume)
@@ -380,6 +384,7 @@ def load_model(args, model_without_ddp, optimizer, loss_scaler):
                 random.setstate(rng['python'])
                 state = rng['numpy']
                 np.random.set_state((state[0], np.array(state[1], dtype=np.uint32), *state[2:]))
+        return checkpoint
 
 
 def all_reduce_mean(x):

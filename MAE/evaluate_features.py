@@ -23,7 +23,8 @@ def extract(model, dataset, device, seed):
     return torch.cat(features), torch.cat(labels)
 
 
-def linear_probe(train, labels, validation, targets, args, log, epoch):
+def linear_probe(train, labels, validation, targets, args, log, epoch,
+                 pooling='Final raw tokens averaged including CLS'):
     classifier = torch.nn.Linear(train.shape[1], 100)
     optimizer = torch.optim.AdamW(classifier.parameters(), lr=.01)
     probe_updates = 0
@@ -52,7 +53,7 @@ def linear_probe(train, labels, validation, targets, args, log, epoch):
                        probe_epoch=probe_epoch + 1, accuracy_percent=accuracy, samples=len(targets))
     print(f'Linear-probe accuracy: {accuracy:.2f}% ({len(targets)} validation images)')
     torch.save(dict(model=classifier.state_dict(), probe_updates=probe_updates,
-                    pooling='Final raw tokens averaged including CLS'),
+                    pooling=pooling),
                log.root / 'checkpoints' / f'linear-probe-epoch-{epoch:04d}.pth')
 
 
@@ -64,8 +65,10 @@ def measure_depth(model, dataset, device, args, log, epoch):
     def capture(layer):
         def hook(module, inputs, output):
             tokens = output.detach().float().cpu()
-            cls[layer].append(tokens[:, 0])
-            energy, high, variation = spatial_energy(tokens[:, 1:], model.patch_embed.grid_size)
+            has_cls = getattr(model, 'feature_has_cls', True)
+            cls[layer].append(tokens[:, 0] if has_cls else tokens.mean(1))
+            patches = tokens[:, 1:] if has_cls else tokens
+            energy, high, variation = spatial_energy(patches, model.patch_embed.grid_size)
             sums[layer] += torch.tensor([energy.sum(), high.sum(), variation.sum()], dtype=torch.float64)
         return hook
     try:
@@ -77,7 +80,8 @@ def measure_depth(model, dataset, device, args, log, epoch):
             hook.remove()
     for layer, (features, total) in enumerate(zip(cls, sums)):
         log.record('depth_metrics', epoch=epoch, optimizer_updates=args.optimizer_updates,
-                   layer=layer + 1, samples=len(dataset), feature='CLS; sample-by-sample covariance across channels',
+                   layer=layer + 1, samples=len(dataset),
+                   feature=('CLS' if getattr(model, 'feature_has_cls', True) else 'Mean patch tokens') + '; sample-by-sample covariance across channels',
                    effective_rank=effective_rank(torch.cat(features)),
                    frequency_cutoff_cycles_per_patch=.25,
                    high_frequency_fraction=(total[1] / total[0]).item() if total[0] else 0.0,
@@ -106,7 +110,8 @@ def evaluate_features(model, transform, device, args, log, epoch):
             cache.mkdir(exist_ok=True)
             torch.save(dict(train=train_features, labels=labels, validation=val_features, targets=targets,
                             train_indices=train_indices, validation_indices=val_indices,
-                            pooling='Final raw tokens averaged including CLS'), cache / f'epoch-{epoch:04d}.pt')
+                            pooling=getattr(model, 'pooling_description', 'Final raw tokens averaged including CLS')),
+                       cache / f'epoch-{epoch:04d}.pt')
             accuracy = knn_accuracy(train_features, labels, val_features, targets)
             log.record('knn', epoch=epoch, optimizer_updates=args.optimizer_updates,
                        accuracy_percent=accuracy, train_samples=len(labels), samples=len(targets),
@@ -115,6 +120,7 @@ def evaluate_features(model, transform, device, args, log, epoch):
             depth_indices = torch.linspace(0, len(val_indices) - 1, min(200, len(val_indices))).long().tolist()
             measure_depth(model, Subset(validation, [val_indices[i] for i in depth_indices]), device, args, log, epoch)
             if args.probe_epochs:
-                linear_probe(train_features, labels, val_features, targets, args, log, epoch)
+                linear_probe(train_features, labels, val_features, targets, args, log, epoch,
+                             pooling=getattr(model, 'pooling_description', 'Final raw tokens averaged including CLS'))
     finally:
         model.train(was_training)

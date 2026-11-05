@@ -27,7 +27,8 @@ class Tee:
 
 
 class RunLog:
-    def __init__(self, root, args):
+    def __init__(self, root, args, loss_name='mae'):
+        self.loss_name = loss_name
         run_id = datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%SZ')
         self.run_id = f'{run_id}-{uuid.uuid4().hex[:8]}'
         self.root = Path(root).resolve() / self.run_id
@@ -35,7 +36,7 @@ class RunLog:
             (self.root / folder).mkdir(parents=True, exist_ok=False)
         self.events = (self.root / 'logs/metrics.jsonl').open('a', buffering=1)
         self.separate_logs = {}
-        for name in ('train/mae', 'validation/mae', 'train/linear_probe',
+        for name in (f'train/{loss_name}', f'validation/{loss_name}', 'train/linear_probe',
                      'validation/linear_probe', 'evaluation/features'):
             path = self.root / 'logs' / (name + '.jsonl')
             path.parent.mkdir(exist_ok=True)
@@ -48,7 +49,7 @@ class RunLog:
         def git(*command):
             return subprocess.check_output(['git', '-C', str(repo), *command], text=True).strip()
         versions = {}
-        for name in ('torch', 'torchvision', 'timm', 'numpy', 'matplotlib', 'flash-attn'):
+        for name in ('torch', 'torchvision', 'timm', 'numpy', 'matplotlib', 'flash-attn', 'diffusers', 'torchdiffeq'):
             try:
                 versions[name] = importlib.metadata.version(name)
             except importlib.metadata.PackageNotFoundError:
@@ -59,7 +60,7 @@ class RunLog:
                         python=sys.version, platform=platform.platform(), versions=versions,
                         gpu=torch.cuda.get_device_name() if torch.cuda.is_available() else None,
                         cuda=torch.version.cuda, precision='fp16_amp' if args.temp5 == 1 else 'fp32',
-                        attention='flash_attn_if_supported_else_pytorch_sdpa')
+                        attention='flash_attn_if_supported_else_pytorch_sdpa', loss_name=loss_name)
         self.metadata = metadata
         self.save_metadata()
         self.record('status', status='running', resume_checkpoint=args.resume or None)
@@ -82,9 +83,9 @@ class RunLog:
         self.events.flush()
         destination = None
         if event in ('train_update', 'skipped_update', 'train_epoch'):
-            destination = 'train/mae'
+            destination = f'train/{self.loss_name}'
         elif event == 'validation':
-            destination = 'validation/mae'
+            destination = f'validation/{self.loss_name}'
         elif event in ('linear_probe', 'linear_probe_update'):
             destination = 'train/linear_probe'
         elif event == 'linear_probe_validation':

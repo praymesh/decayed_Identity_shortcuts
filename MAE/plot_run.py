@@ -15,7 +15,7 @@ def plot_run(root):
     settings = json.loads((root / 'logs/settings.json').read_text())
     method = settings.get('method', {})
     dataset = settings.get('dataset', {}).get('kind', 'unknown data')
-    title = f'{root.name}\n{dataset}, a_min={method.get("min_decay")}, beta={method.get("beta")}'
+    title = f'{root.name}\n{dataset}, a_min={method.get("min_decay", method.get("min_sigma"))}, beta={method.get("beta")}'
     curves = root / 'curves'
     curves.mkdir(exist_ok=True)
 
@@ -49,7 +49,8 @@ def plot_run(root):
     for key, label in [('effective_rank', 'Covariance singular-value entropy'),
                        ('high_frequency_fraction', 'High-frequency energy / total non-DC energy'),
                        ('total_variation', 'Mean squared spatial difference')]:
-        plot(key + '.png', label, [(key, label, 'depth_metrics', 'layer')], 'Encoder block (1-based)')
+        block_label = 'Transformer block (1-based)' if settings.get('loss_name') == 'velocity' else 'Encoder block (1-based)'
+        plot(key + '.png', label, [(key, label, 'depth_metrics', 'layer')], block_label)
     print('Saved available measurements to', curves)
 
 
