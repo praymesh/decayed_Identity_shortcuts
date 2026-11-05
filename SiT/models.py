@@ -11,7 +11,21 @@ import torch.nn as nn
 import numpy as np
 import math
 from timm.models.vision_transformer import PatchEmbed,  Mlp
-from flash_attn import flash_attn_qkvpacked_func, flash_attn_kvpacked_func
+try:
+    from flash_attn import flash_attn_qkvpacked_func
+except ImportError:
+    flash_attn_qkvpacked_func = None
+
+
+def local_average(x):
+    """Uniform 5x5 average on SiT's complete latent-token grid; no CLS token."""
+    batch, tokens, channels = x.shape
+    side = math.isqrt(tokens)
+    if side * side != tokens:
+        raise ValueError('SiT patch tokens must form a complete square grid')
+    grid = x.transpose(1, 2).reshape(batch, channels, side, side)
+    return torch.nn.functional.avg_pool2d(
+        grid, 5, stride=1, padding=2, count_include_pad=False).flatten(2).transpose(1, 2)
 
 class Attention(nn.Module):
     def __init__(self, dim, num_heads=8, qkv_bias=False, qk_scale=None, attn_drop=0., proj_drop=0.):
@@ -30,7 +44,15 @@ class Attention(nn.Module):
     def forward(self, x):
         B, N, C = x.shape
         qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, -1)
-        x = flash_attn_qkvpacked_func(qkv, self.attn_drop_prob, self.scale).reshape(B, N, -1)
+        dropout = self.attn_drop_prob if self.training else 0.0
+        if (flash_attn_qkvpacked_func is not None and x.is_cuda
+                and x.dtype in (torch.float16, torch.bfloat16)
+                and torch.cuda.get_device_capability(x.device)[0] >= 8):
+            x = flash_attn_qkvpacked_func(qkv, dropout, self.scale).reshape(B, N, -1)
+        else:
+            q, k, v = qkv.permute(2, 0, 3, 1, 4).unbind(0)
+            x = torch.nn.functional.scaled_dot_product_attention(q, k, v, dropout_p=dropout, scale=self.scale)
+            x = x.transpose(1, 2).reshape(B, N, C)
         x = self.proj(x)
         x = self.proj_drop(x)
         return x
@@ -121,9 +143,10 @@ class SiTBlock(nn.Module):
     """
     A SiT block with adaptive layer norm zero (adaLN-Zero) conditioning.
     """
-    def __init__(self, hidden_size, num_heads, mlp_ratio=4.0, skip = False, decay = [1,1], **block_kwargs):
+    def __init__(self, hidden_size, num_heads, mlp_ratio=4.0, skip = False, decay = [1,1], beta=0.0, **block_kwargs):
         super().__init__()
         self.decay = decay
+        self.beta = beta
         self.norm1 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         self.attn = Attention(hidden_size, num_heads=num_heads, qkv_bias=True, **block_kwargs)
         self.norm2 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
@@ -137,12 +160,17 @@ class SiTBlock(nn.Module):
         if skip:
             self.skip = nn.Linear(hidden_size, hidden_size)
 
+    def shortcut(self, x, multiplier):
+        if self.beta == 0 or multiplier == 1:
+            return multiplier * x
+        return multiplier * x + self.beta * (1 - multiplier) * local_average(x)
+
     def forward(self, x, c, skip = None):
         if skip is not None:
             x = x + self.skip(skip)
         shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.adaLN_modulation(c).chunk(6, dim=1)
-        x = self.decay[0] * x + gate_msa.unsqueeze(1) * self.attn(modulate(self.norm1(x), shift_msa, scale_msa))
-        x = self.decay[1] * x + gate_mlp.unsqueeze(1) * self.mlp(modulate(self.norm2(x), shift_mlp, scale_mlp))
+        x = self.shortcut(x, self.decay[0]) + gate_msa.unsqueeze(1) * self.attn(modulate(self.norm1(x), shift_msa, scale_msa))
+        x = self.shortcut(x, self.decay[1]) + gate_mlp.unsqueeze(1) * self.mlp(modulate(self.norm2(x), shift_mlp, scale_mlp))
         return x
 
 
@@ -182,9 +210,13 @@ class SiT(nn.Module):
         class_dropout_prob=0.1,
         num_classes=1000,
         min_sigma = 0.8,
+        beta=0.0,
         learn_sigma=True,
     ):
         super().__init__()
+        if not 0 <= min_sigma <= 1 or not 0 <= beta <= 1:
+            raise ValueError('Shortcut multipliers and beta must be in [0,1]')
+        self.min_sigma, self.beta = min_sigma, beta
         self.learn_sigma = learn_sigma
         self.in_channels = in_channels
         self.out_channels = in_channels * 2 if learn_sigma else in_channels
@@ -199,13 +231,25 @@ class SiT(nn.Module):
         self.pos_embed = nn.Parameter(torch.zeros(1, num_patches, hidden_size), requires_grad=False)
         self.sigma = np.linspace(1, min_sigma, 2 * depth).reshape(depth, -1)
         self.enc_blocks = nn.ModuleList([
-            SiTBlock(hidden_size, num_heads, mlp_ratio=mlp_ratio, decay = self.sigma[i]) for i in range(depth // 2)
+            SiTBlock(hidden_size, num_heads, mlp_ratio=mlp_ratio, decay = self.sigma[i], beta=beta) for i in range(depth // 2)
         ])
         self.dec_blocks = nn.ModuleList([
-            SiTBlock(hidden_size, num_heads, mlp_ratio=mlp_ratio, skip = True, decay = self.sigma[i + depth // 2]) for i in range(depth // 2)
+            SiTBlock(hidden_size, num_heads, mlp_ratio=mlp_ratio, skip = True, decay = self.sigma[i + depth // 2], beta=beta) for i in range(depth // 2)
         ])
         self.final_layer = FinalLayer(hidden_size, patch_size, self.out_channels)
         self.initialize_weights()
+
+    def method_settings(self):
+        return dict(min_sigma=self.min_sigma, beta=self.beta, local_kernel='uniform5')
+
+    def set_method_settings(self, min_sigma=.8, beta=0.0, local_kernel='uniform5'):
+        if local_kernel != 'uniform5' or not 0 <= min_sigma <= 1 or not 0 <= beta <= 1:
+            raise ValueError('Invalid shortcut settings')
+        self.min_sigma, self.beta = min_sigma, beta
+        blocks = list(self.enc_blocks) + list(self.dec_blocks)
+        self.sigma = np.linspace(1, min_sigma, 2 * len(blocks)).reshape(len(blocks), 2)
+        for block, decay in zip(blocks, self.sigma):
+            block.decay, block.beta = decay, beta
 
     def initialize_weights(self):
         # Initialize transformer layers:
@@ -258,7 +302,7 @@ class SiT(nn.Module):
         imgs = x.reshape(shape=(x.shape[0], c, h * p, h * p))
         return imgs
 
-    def forward(self, x, t, y):
+    def forward_tokens(self, x, t, y):
         """
         Forward pass of SiT.
         x: (N, C, H, W) tensor of spatial inputs (images or latent representations of images)
@@ -275,6 +319,10 @@ class SiT(nn.Module):
             x_list.append(x)
         for block in self.dec_blocks:
             x = block(x, c, x_list.pop(-1))                      # (N, T, D)
+        return x, c
+
+    def forward(self, x, t, y):
+        x, c = self.forward_tokens(x, t, y)
         x = self.final_layer(x, c)                # (N, T, patch_size ** 2 * out_channels)
         x = self.unpatchify(x)                   # (N, out_channels, H, W)
         if self.learn_sigma:

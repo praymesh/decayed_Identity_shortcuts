@@ -1,0 +1,23 @@
+{
+  "repo": "stabilityai/sd-vae-ft-ema",
+  "revision": "f04b2c4b98319346dad8c65879f680b1997b204a",
+  "files": [
+    {
+      "rfilename": "config.json",
+      "blobId": "0db26717579be63eb0ddbf15b43faa43700dfe5a",
+      "size": 547
+    },
+    {
+      "rfilename": "diffusion_pytorch_model.safetensors",
+      "blobId": "d3b25ede90bdb6033ab2a7a435215ea558e742a2",
+      "size": 334643276,
+      "lfs": {
+        "sha256": "32db726da04f06c1b6b14c0043ce115cc87a501482945c5add89a40d838fcb46",
+        "size": 334643276,
+        "pointerSize": 134
+      }
+    }
+  ],
+  "frozen": true,
+  "source": "Repository SiT/train.py AutoencoderKL.from_pretrained default; identical for all methods"
+}
