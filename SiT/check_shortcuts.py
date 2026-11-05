@@ -63,6 +63,21 @@ def main():
     print('PASS: grid positions, normalized borders, constants and average gradients')
     print('PASS: beta=0 original recovery, unit multipliers, unchanged parameters')
     print('PASS: checkpoint settings/outputs and finite full forward/backward')
+    from feature_eval import FeatureAdapter
+    class FakeVAE(torch.nn.Module):
+        def encode(self, images):
+            return types.SimpleNamespace(latent_dist=types.SimpleNamespace(mode=lambda: images))
+    class RecordingModel(torch.nn.Module):
+        y_embedder = types.SimpleNamespace(num_classes=100)
+        def forward_tokens(self, latents, times, labels):
+            assert torch.equal(times, torch.ones_like(times))
+            assert torch.equal(labels, torch.full_like(labels, 100))
+            return latents.flatten(2).transpose(1, 2), None
+    adapter = FeatureAdapter(RecordingModel(), FakeVAE()).eval()
+    output = adapter.forward_feat(inputs)[0]
+    torch.testing.assert_close(output, (inputs * .18215).flatten(2).transpose(1, 2))
+    assert not adapter.feature_has_cls
+    print('PASS: feature extraction uses clean t=1, null labels and all patch tokens')
 
 
 if __name__ == '__main__':

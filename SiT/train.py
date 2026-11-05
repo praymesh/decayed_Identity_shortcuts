@@ -23,13 +23,13 @@ from time import time
 import argparse
 import logging
 import os
+from pathlib import Path
 
 from models import SiT_models
 from download import find_model
 from transport import create_transport, Sampler
 from diffusers.models import AutoencoderKL
 from train_utils import parse_transport_args
-import wandb_utils
 
 #################################################################################
 #                             Training Helper Functions                         #
@@ -109,6 +109,11 @@ def main(args):
     """
     Trains a new SiT model.
     """
+    if args.local:
+        from local_train import train_local
+        return train_local(args, update_ema, requires_grad, center_crop_arr)
+    if args.wandb:
+        import wandb_utils
     assert torch.cuda.is_available(), "Training currently requires at least one GPU."
 
     # Setup DDP:
@@ -147,7 +152,7 @@ def main(args):
     model = SiT_models[args.model](
         input_size=latent_size,
         num_classes=args.num_classes,
-        min_sigma=args.min_sigma
+        min_sigma=args.min_sigma, beta=args.beta
     )
 
     # Note that parameter initialization is done within the SiT constructor
@@ -318,7 +323,7 @@ if __name__ == "__main__":
     # Default args here will train SiT-XL/2 with the hyperparameters we used in our paper (except training iters).
     parser = argparse.ArgumentParser()
     parser.add_argument("--data-path", type=str, required=True)
-    parser.add_argument("--results-dir", type=str, default="results")
+    parser.add_argument("--results-dir", type=str, default=str(Path(__file__).resolve().parents[1] / 'runs/sit'))
     parser.add_argument("--model", type=str, choices=list(SiT_models.keys()), default="SiT-XL/2")
     parser.add_argument("--image-size", type=int, choices=[256, 512], default=256)
     parser.add_argument("--num-classes", type=int, default=1000)
@@ -332,7 +337,18 @@ if __name__ == "__main__":
     parser.add_argument("--sample-every", type=int, default=10_000)
     parser.add_argument("--cfg-scale", type=float, default=4.0)
     parser.add_argument("--min-sigma", type=float, default=0.8)
-    parser.add_argument("--wandb", action="store_false")
+    parser.add_argument("--wandb", action="store_true")
+    parser.add_argument('--local', action='store_true', help='Logged single-GPU runner with gradient accumulation')
+    parser.add_argument('--beta', type=float, default=0.0)
+    parser.add_argument('--batch-size', type=int, default=8, help='Physical batch for --local')
+    parser.add_argument('--memory-budget-gib', type=float, default=7.0)
+    parser.add_argument('--val-every', type=int, default=5)
+    parser.add_argument('--val-samples', type=int, default=0)
+    parser.add_argument('--train-per-class', type=int, default=0, help='Small labelled pilot subset; 0 uses full train split')
+    parser.add_argument('--feature-eval', action='store_true')
+    parser.add_argument('--probe-epochs', type=int, default=200)
+    parser.add_argument('--vae-path', type=str, default=str(Path(__file__).resolve().parents[1] / 'checkpoints/sd-vae-ft-ema'))
+    parser.add_argument('--latent-cache', type=str, default='')
     parser.add_argument("--ckpt", type=str, default=None,
                         help="Optional path to a custom SiT checkpoint")
 

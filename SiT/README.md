@@ -1,3 +1,43 @@
+## Task 1: ImageNet-100 comparison
+
+The local runner compares the repository's standard shortcuts, fixed decay, and
+uniform 5x5 frequency-selective decay. SiT has no missing patch tokens or CLS;
+both encoder and decoder attention/MLP shortcuts use the original linear schedule.
+The fixed and active comparisons use `--min-sigma .8`, with beta 0 and .5.
+SiT-B/4 is the practical Base-size configuration for the 8 GB memory budget.
+
+The frozen official VAE is pinned in `configs/vae.json`. Store its two files under
+`../checkpoints/sd-vae-ft-ema/`. The VAE is shared by all methods; SiT weights start
+from scratch. The same approved CMC-160 images are center-cropped to 256 pixels.
+Cache float32 posterior mean/log-variance for both pixel flips; sample new latents
+on every training batch. This preserves the native crop, flip and VAE sampling
+choices without repeatedly encoding images during all 200 epochs.
+
+From the repository root:
+
+```bash
+python SiT/latent_data.py --data datasets/imagenet100-cmc-160 \
+  --output datasets/imagenet100-cmc-160/sit_latents --vae checkpoints/sd-vae-ft-ema
+python SiT/queue_local.py --data-root datasets/imagenet100-cmc-160 \
+  --latent-cache datasets/imagenet100-cmc-160/sit_latents \
+  --model SiT-B/4 --epochs 200 --batch-size 64 --memory-budget-gib 7
+```
+
+Each run has separate `logs/train`, `logs/validation`, `logs/evaluation`, `curves`
+and `checkpoints` folders. The velocity loss is distinct from MAE loss. Validation
+uses fixed noise and frozen EMA weights. Final feature evaluation uses posterior
+means, clean time t=1, a null class condition, and mean patch-token pooling. No
+ground-truth class label is passed to feature extraction. The default probe/KNN
+subsets match the MAE subset sizes; no FID or full-paper reproduction is claimed.
+Rank uses mean patch tokens because SiT has no CLS. Feature caches and depth
+metrics are saved separately. A capped H200 run still needs real RTX 3070 checks.
+
+Small checks: `python SiT/check_shortcuts.py`. Local resume uses `--ckpt PATH`,
+restores EMA/model/optimizer/scaler, RNG and update counters, and creates a new run
+folder. Data, posteriors and outputs are ignored by Git and need separate backups.
+
+## Original repository instructions
+
 We conducted our experiments using the original SiT codebase, modifying only the model architecture to incorporate our decayed residual connections and additional skip-connections.
 Follow the setup instructions in the original SiT codebase (shown below).
 You can then launch experiments for SiT-XL/2 on ImageNet-1K with a minimum residual decay factor = 0.8.
