@@ -185,5 +185,6 @@
     "reconstruction_loss_equal": true,
     "unmasked_features_equal": true,
     "tolerance": "Exact equality, rtol=0, atol=0"
-  }
+  },
+  "report_generator_commit": "1954452"
 }

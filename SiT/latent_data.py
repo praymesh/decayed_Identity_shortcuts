@@ -37,6 +37,8 @@ def prepare(args):
     classes = (Path(__file__).resolve().parents[1] / 'MAE/configs/imagenet100_cmc_classes.txt').read_text().split()
     vae = AutoencoderKL.from_pretrained(args.vae, local_files_only=True, use_safetensors=True).cuda().eval().requires_grad_(False)
     metadata = dict(status='preparing', source=str(args.data.resolve()),
+                    dataset={key: value for key, value in json.loads((args.data / 'verified.json').read_text()).items()
+                             if key in ('repo', 'revision', 'resized_shorter_side', 'counts', 'class_to_idx')},
                     vae=json.loads((Path(__file__).parent / 'configs/vae.json').read_text()),
                     transform='ADM center crop 256; pixel-space horizontal flips encoded separately',
                     dtype='float32', channels='4 posterior mean + 4 log variance; scale latents by .18215 AFTER sampling',
