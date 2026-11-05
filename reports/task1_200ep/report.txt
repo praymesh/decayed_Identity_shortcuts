@@ -1,0 +1,175 @@
+Task 1: Frequency-Selective Residual Decay — audited experiment report
+
+The result supports the main Task 1 hypothesis in one controlled setting. With
+200 epochs of MAE pretraining on the approved CMC-160 ImageNet-100 release,
+beta=0.5 improved linear-probe accuracy by 7.7 percentage points and KNN accuracy
+by 11.0 points over original fixed decay. Deep patch features also contained a
+substantially smaller high-frequency energy share. This is evidence from one
+seed and one evaluation subset, rather than a general proof or a complete paper
+reproduction.
+
+Final recorded results:
+Method                         Train MAE   Validation MAE   KNN      Linear probe
+Standard shortcuts             0.379878    0.409020         28.5%    34.7%
+Fixed decay, a_min=.7           0.381645    0.410559         37.6%    44.6%
+Frequency-selective, beta=.5    0.384452    0.412325         48.6%    52.3%
+
+The active method gains 17.6 linear-probe points and 20.1 KNN points over the
+standard control. Against fixed decay it classifies 145 previously incorrect
+validation images correctly while losing 68 previously correct images: a net
+77 more correct predictions on the same 1000 images. Classification accuracy
+therefore improved while reconstruction loss increased slightly: validation
+MAE was 0.43% higher than fixed decay. Better reconstruction was not demonstrated.
+
+Every model used the same repository architecture, including encoder-to-decoder
+skip connections and initialization. The control is the same architecture with
+all encoder shortcut multipliers set to one, rather than an unrelated stock MAE.
+All have 117038848 trainable parameters. The active method adds none.
+
+Common settings were ViT-B/16, 224x224 model inputs, a 12-block 768-channel
+encoder, 75% masking, normalized pixel reconstruction loss, AdamW, weight decay
+0.05, peak learning rate 0.00015, 20 warmup epochs and cosine learning-rate decay.
+All models started from scratch with seed 0 and no pretrained checkpoint.
+Physical batch size was 32, with eight batches accumulated per optimizer update:
+the effective batch was 256 for every method. Precision was FP16 mixed precision.
+The GPU was an H200 with a 7 GiB PyTorch allocator limit. The exact launch commands
+and source run paths are in commands.txt and audit.json. Training source commit:
+6b3d9996c492bc544b62b170a6155c3c35f53b88 (clean checkout at launch).
+
+The approved dataset was clane9/imagenet-100, revision
+0519dc2f402a3a18c6e57f7913db059215eee25b, with 126689 training and 5000 validation
+images in 100 CMC classes. The source resized images to 160 pixels on the shorter
+side before our 224-pixel training crops. Every original dataset shard checksum
+was verified, and the class list, counts and label mapping are tracked in
+MAE/configs/. With drop_last=True, 126688 training images were processed per epoch.
+This dataset was approved as a new exploratory comparison: the teammate's exact
+baseline commands, class list and checkpoint provenance remain unverified.
+
+MAE validation used all 5000 validation images, fixed resize/center-crop transforms
+and mask seed 12345, once every five epochs. Each method completed 40 validation
+passes. All recorded losses were finite, and every successive validation loss
+was lower than the previous one. Each method attempted 99000 optimizer updates;
+33 FP16 overflow updates were automatically skipped, leaving exactly 98967 actual
+updates in every method. The skipped updates were recorded, not counted as steps.
+
+Classification evaluation used exactly the same 1000 training images and 1000
+validation images for every method, with ten images per class in each subset.
+The image indices and labels were compared directly across saved caches. Encoder
+features were extracted without masking in batches of two, then cached on CPU
+and disk. Pooling follows the repository's custom MAE evaluator: average all final
+raw tokens INCLUDING CLS, without adding an encoder output normalization.
+KNN used cosine-normalized features, k=20 and exponential vote temperature 0.07.
+The linear classifier was trained on frozen cached features for 200 epochs using
+AdamW, batch 256, initial learning rate 0.01, and a cosine schedule. Its loss was
+logged separately from MAE loss. Saved classifier weights and cached validation
+features reproduced all three reported accuracies, and recomputed KNN matched too.
+The 1% chance level for balanced 100-class classification is far below all scores,
+but these are small-label-subset results, not full-data benchmark accuracies.
+
+The shortcut is a*X + beta*(1-a)*L, where L is the visibility-normalized 5x5 uniform
+local average. Writing X=L+(X-L) gives:
+    [a + beta*(1-a)]*L + a*(X-L).
+Thus beta=.5 preserves the local-average term with coefficient (1+a)/2, while
+the detail term retains coefficient a. This algebra explains the intended change;
+under an irregular MAE visibility mask, L is a masked local average rather than a
+perfect Fourier low-frequency projection. Visible tokens are scattered into their
+original grid positions, features and visibility are averaged together, and the
+result is gathered back in the visible-token order. CLS retains the scalar
+shortcut, and the local average is recomputed for the MLP shortcut. The decoder,
+learned branches, initialization and reconstruction objective are preserved.
+
+Frequency analysis used the same 200 complete, unmasked validation images for
+all methods and all 12 encoder blocks. CLS was excluded. Per-channel spatial
+means were removed, and a 2D orthonormal FFT was applied to the 14x14 patch grid.
+The fixed high-frequency cutoff was radial frequency above 0.25 cycles per patch.
+The high-frequency fraction divides summed high-frequency energy by all non-DC
+spatial energy across the evaluated images/channels. Absolute energy is averaged per image and summed over channels and frequency bins.
+Low-frequency energy below includes non-DC frequencies only; the spatial mean/DC
+component is excluded.
+
+Final encoder block (12):
+Method                 HF share    HF energy    LF energy    Total variation
+Standard               54.46%      112172.92    93790.86     1.805424
+Fixed decay            42.09%       16062.49    22098.97     0.259176
+Frequency-selective    14.46%        7181.05    42473.92     0.120050
+
+Compared with fixed decay, the active method reduced high-frequency share by
+27.63 percentage points (65.6% relative), absolute high-frequency energy by 55.3%,
+and mean squared neighbouring-patch variation by 53.7%. Its low-frequency energy
+increased by 92.2%, and total non-DC energy increased by 30.1%. The lower HF share
+therefore was not caused by uniformly shrinking every feature. These are raw
+learned-feature units and support the expected spectral effect; they do not prove
+that frequency suppression is the sole cause of the classification gain. The
+active method has larger variation in some early blocks, so the result is not
+that every layer is smoother. The clearest suppression appears in deeper blocks.
+All depth measurements are in depth_metrics.csv and depth_comparison.png.
+
+Effective rank was measured as covariance singular-value entropy using natural
+logarithms, WITHOUT exponentiation. Features were CLS vectors from the same 200
+images. Rows represented samples and columns represented 768 channels. Each row
+was centered across channels, and sample-by-sample covariance was Xc*Xc.T/(768-1).
+Normalized nonnegative covariance eigenvalues equal its normalized singular values.
+Final CLS rank entropy was 2.546771 (standard), 3.187825 (fixed), and 2.966075
+(active). These values are entropies, not literal counts of feature dimensions.
+The active method is lower than fixed decay but higher than standard; classification
+accuracy is therefore NOT monotonically ordered by lower rank across these runs.
+We did not confirm a universal claim that lower effective rank means better
+representations. Entropy also generally grew toward the last encoder blocks,
+so rank contraction across depth was not demonstrated. Rank describes CLS while classification pools all tokens, and
+frequency analysis describes patch tokens; these feature choices must stay explicit.
+
+Runtime including each run's setup and final evaluation was approximately
+6h38m16s (standard), 6h44m05s (fixed), and 9h42m50s (active). The complete queue
+finished in 23h05m23s, within the requested 24-hour budget. The active method took
+44.2% longer than fixed decay. Peak PyTorch allocated memory was 4.207, 4.207 and
+5.032 GiB, respectively; peak reserved memory was 4.643, 4.643 and 5.541 GiB.
+The active method added about 19.6% peak allocated memory. Those are measured
+PyTorch peaks, not continuous whole-process GPU-memory samples. Observed device
+usage during the active run was about 6.3 GiB. No RTX 3070 run has been performed:
+an H200 allocator cap is evidence for the memory budget, not hardware certification.
+
+The required small implementation checks passed for beta=0 recovery, unit
+multipliers, constant visible features, hidden-patch isolation, token order, spatial
+positions, CLS, gradients, unchanged parameter count, finite forward/backward and
+settings/output restoration. As an additional report audit, full TRAINED ViT-B
+weights were loaded into the pre-change model and the current model with beta=0.
+Two explicitly synthetic 224x224 inputs and identical masks gave exact equality
+for encoder outputs, masks, reconstruction loss and unmasked features under the
+same attention backend. Unit multipliers also recovered the same-architecture
+standard shortcut with trained weights. These checks are synthetic correctness
+evidence and are not ImageNet performance results.
+
+Task coverage:
+- Implemented and checked the requested masked, fixed uniform-5x5 shortcut rule.
+- Completed a matched standard/fixed/active comparison and required logging.
+- Demonstrated improved subset KNN and linear-probe accuracy in this experiment.
+- Measured the expected deep-feature spectral shift and checked total variation.
+- Measured covariance entropy honestly; a simple universal rank/accuracy claim
+  was not supported by the ordering of these results.
+- Demonstrated the H200 memory-budget run, including unmasked feature extraction;
+  a real RTX 3070 training/evaluation check is still required.
+- beta=1, Gaussian-like averaging, additional seeds, full-data classification
+  evaluation and verification of the teammate baseline remain outstanding.
+- Diffusion models and Task 2 rank-feedback were excluded as requested.
+
+The paper's reported ImageNet-100 protocol uses 800 pretraining epochs, effective
+batch 1024, peak learning rate .0006 and 40 warmup epochs. Its linear probe uses
+batch 1024 for 200 epochs. It reports 76.5% for the 768-channel/12-block standard
+control and 81.8% at a_min=.7. Our shorter training, resized source images and
+classification subset protocol prevent a direct numerical reproduction claim.
+The lower learning rate in our run has the same learning-rate-to-batch ratio.
+Source: https://arxiv.org/html/2404.10947v5 (Table 3 and Appendix A).
+
+Recommended defensible claim:
+“In one matched 200-epoch MAE experiment on the approved CMC-160 ImageNet-100
+release, visibility-aware frequency-selective shortcut decay with beta=.5 improved
+linear-probe accuracy by 7.7 percentage points and KNN accuracy by 11.0 points over
+fixed decay on identical balanced 1000-image evaluation subsets. It also reduced
+final-layer high-frequency energy share from 42.1% to 14.5% while retaining more
+low-frequency energy, at a 44% runtime cost and about 20% extra peak allocated
+memory. Multiple seeds and full-data evaluation are needed to establish robustness.”
+
+Selected report tables and figures are tracked deliberately in reports/task1_200ep.
+Raw run logs, feature caches, checkpoints and downloaded data are ignored by Git
+and require a separate backup. They remain under the repository's runs/ and
+datasets/ directories. Git commits alone do not preserve those large artifacts.
