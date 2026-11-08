@@ -19,6 +19,7 @@ def main():
     parser.add_argument('--num_workers', type=int, default=4)
     parser.add_argument('--output_dir', type=Path, default=Path(__file__).resolve().parents[1] / 'runs')
     parser.add_argument('--dry_run', action='store_true')
+    parser.add_argument('--ablations', action='store_true', help='Run uniform beta=1 and Gaussian beta=.5')
     args = parser.parse_args()
     if args.epochs < 2:
         raise ValueError('Use at least two epochs with the one-epoch warmup')
@@ -38,12 +39,16 @@ def main():
               '--weight_decay', '0.05', '--mask_ratio', '0.75', '--norm_pix_loss',
               '--seed', '0', '--num_workers', str(args.num_workers), '--memory_budget_gib', str(args.memory_budget_gib),
               '--eval_epochs_interval', '5',
-              '--feature_eval', '--feature_train_per_class', '10',
-              '--feature_val_samples', '1000', '--probe_epochs', '200']
+              '--feature_eval', '--feature_train_per_class', '0' if args.ablations else '10',
+              '--feature_val_samples', '0' if args.ablations else '1000', '--probe_epochs', '200']
+    if args.ablations:
+        common += ['--probe_batch_size', '1024', '--extraction_batch_size', '8', '--checkpoint_interval', '0']
     jobs = []
-    for name, decay, beta in [('standard', '1', '0'), ('fixed_decay', '.7', '0'),
-                              ('frequency_selective', '.7', '.5')]:
-        command = common + ['--min_decay', decay, '--beta', beta, '--output_dir', str(root / name)]
+    variants = ([('beta1_uniform', '.7', '1', 'uniform5'), ('beta05_gaussian', '.7', '.5', 'gaussian5')]
+                if args.ablations else [('standard', '1', '0', 'uniform5'), ('fixed_decay', '.7', '0', 'uniform5'),
+                                       ('frequency_selective', '.7', '.5', 'uniform5')])
+    for name, decay, beta, kernel in variants:
+        command = common + ['--min_decay', decay, '--beta', beta, '--local_kernel', kernel, '--output_dir', str(root / name)]
         jobs.append(dict(method=name, command=command, status='pending'))
         print(shlex.join(command), flush=True)
     if args.dry_run:

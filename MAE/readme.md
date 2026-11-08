@@ -11,6 +11,23 @@ allocator cap. Every invocation creates a separate run with settings, logs,
 feature caches, classifier weights and curves. These ignored outputs need backup.
 `--train-per-class` and `--val-samples` are diagnostic limits; zero means all.
 
+Queue the two remaining matched 200-epoch comparisons from scratch:
+
+```bash
+python MAE/queue_experiments.py --ablations --data_root datasets/imagenet100-cmc-160 \
+  --epochs 200 --batch_size 32 --memory_budget_gib 7 --num_workers 16 \
+  --output_dir runs/mae_ablations
+```
+
+These compare uniform 5x5 with beta=1 and Gaussian-like 5x5 with beta=.5, both
+with minimum decay .7 and effective batch 256. The fixed Gaussian weights are
+the outer product of `[1,4,6,4,1]` divided by 256; features and visibility use
+the same weights before normalization. No weights are learned by the filter.
+Both finish with full-data KNN and 200-epoch CPU linear probes. To save disk,
+`--checkpoint_interval 0` replaces the latest checkpoint each epoch and keeps
+the final one; existing runs are preserved. Training/validation logs and curves
+stay in separate folders as before.
+
 We conducted our experiments using the original MAE codebase, modifying only the model architecture to incorporate our decayed residual connections and additional skip-connections.
 
 Follow the setup instructions in the original MAE codebase (shown below).

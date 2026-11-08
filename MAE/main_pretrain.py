@@ -53,6 +53,7 @@ def get_args_parser():
     parser.add_argument('--min_decay', default=1.0, type=float,
                         help='minimum decay rate for the skip connection')
     parser.add_argument('--beta', default=0.0, type=float)
+    parser.add_argument('--local_kernel', choices=('uniform5', 'gaussian5'), default='uniform5')
     parser.add_argument('--memory_budget_gib', default=7.0, type=float)
     parser.add_argument('--synthetic_samples', default=0, type=int,
                         help='Synthetic smoke check only; never an ImageNet result')
@@ -70,6 +71,10 @@ def get_args_parser():
     parser.add_argument('--feature_train_per_class', default=10, type=int)
     parser.add_argument('--feature_val_samples', default=1000, type=int)
     parser.add_argument('--probe_epochs', default=200, type=int)
+    parser.add_argument('--probe_batch_size', default=256, type=int)
+    parser.add_argument('--extraction_batch_size', default=2, type=int)
+    parser.add_argument('--checkpoint_interval', default=50, type=int,
+                        help='Keep numbered checkpoints every N epochs; zero keeps last and final only')
     # mixed precision
     parser.add_argument('--temp5', default=1.0, type=float,
                         help='parameter_5')
@@ -254,7 +259,7 @@ def run_training(args, log_writer):
         pin_memory=args.pin_mem, shuffle=False, generator=torch.Generator().manual_seed(args.val_seed))
 
     model = models_mae.__dict__[args.model](img_size=args.input_size, norm_pix_loss=args.norm_pix_loss,
-                                          min_decay=args.min_decay, beta=args.beta)
+                                          min_decay=args.min_decay, beta=args.beta, local_kernel=args.local_kernel)
 
     model.to(device)
 
@@ -285,7 +290,9 @@ def run_training(args, log_writer):
     misc.load_model(args=args, model_without_ddp=model_without_ddp, optimizer=optimizer, loss_scaler=loss_scaler)
     log_writer.save_metadata(settings=vars(args).copy(), method=model_without_ddp.method_settings(),
                              method_name=('standard' if args.min_decay == 1 else
-                                          'fixed_decay' if args.beta == 0 else 'frequency_selective'),
+                                          'fixed_decay' if args.beta == 0 else
+                                          'frequency_selective' if args.beta == .5 and args.local_kernel == 'uniform5' else
+                                          f'frequency_selective_beta{args.beta:g}_{args.local_kernel}'),
                              effective_batch_size=eff_batch_size,
                              trainable_parameters=sum(p.numel() for p in model.parameters() if p.requires_grad))
 
@@ -312,7 +319,7 @@ def run_training(args, log_writer):
             misc.save_model(
                 args=args, model=model, model_without_ddp=model_without_ddp, optimizer=optimizer,
                 loss_scaler=loss_scaler, epoch=epoch, save_last = True)
-            if (epoch + 1) % 50 == 0 or epoch + 1 == args.epochs:
+            if (args.checkpoint_interval > 0 and (epoch + 1) % args.checkpoint_interval == 0) or epoch + 1 == args.epochs:
                 # A hard link preserves this epoch when the next atomic save replaces last.
                 checkpoint = Path(args.output_dir) / 'checkpoint-last.pth'
                 numbered = Path(args.output_dir) / f'checkpoint-{epoch:05d}.pth'

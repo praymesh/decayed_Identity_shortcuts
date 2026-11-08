@@ -16,6 +16,7 @@ def plot_run(root):
     method = settings.get('method', {})
     dataset = settings.get('dataset', {}).get('kind', 'unknown data')
     title = f'{root.name}\n{dataset}, a_min={method.get("min_decay", method.get("min_sigma"))}, beta={method.get("beta")}'
+    title += f", kernel={method.get('local_kernel', 'uniform5')}"
     if 'noise_time' in settings['settings']:
         title += f", block={settings['settings']['layer']}, t={settings['settings']['noise_time']}"
     curves = root / 'curves'
