@@ -15,7 +15,7 @@ def small_model(beta=0, min_decay=.7):
         beta=beta, min_decay=min_decay)
 
 
-def check_average():
+def check_average(local_kernel='uniform5'):
     positions = torch.tensor([[24, 0, 12, 4, 20]])
     x = torch.randn(1, 5, 3, dtype=torch.float64, requires_grad=True)
     expected = []
@@ -23,18 +23,24 @@ def check_average():
         row, col = divmod(position.item(), 5)
         neighbours = [(abs(p.item() // 5 - row) <= 2 and
                        abs(p.item() % 5 - col) <= 2) for p in positions[0]]
-        expected.append(x[0, neighbours].mean(0))
-    torch.testing.assert_close(visible_local_average(x, positions, (5, 5)),
+        weights = x.new_ones(5)
+        if local_kernel == 'gaussian5':
+            vector = x.new_tensor([1, 4, 6, 4, 1])
+            weights = torch.stack([vector[p.item()//5-row+2]*vector[p.item()%5-col+2]
+                                   if nearby else x.new_tensor(0.) for p, nearby in zip(positions[0], neighbours)])
+        weights = weights[neighbours]
+        expected.append((x[0, neighbours]*weights[:, None]).sum(0)/weights.sum())
+    torch.testing.assert_close(visible_local_average(x, positions, (5, 5), local_kernel),
                                torch.stack(expected).unsqueeze(0))
     constant = torch.full_like(x, 3.5)
-    torch.testing.assert_close(visible_local_average(constant, positions, (5, 5)), constant)
+    torch.testing.assert_close(visible_local_average(constant, positions, (5, 5), local_kernel), constant)
     permutation = torch.tensor([2, 4, 0, 3, 1])
     torch.testing.assert_close(
-        visible_local_average(x[:, permutation], positions[:, permutation], (5, 5)),
-        visible_local_average(x, positions, (5, 5))[:, permutation])
+        visible_local_average(x[:, permutation], positions[:, permutation], (5, 5), local_kernel),
+        visible_local_average(x, positions, (5, 5), local_kernel)[:, permutation])
     assert torch.autograd.gradcheck(lambda value: visible_local_average(
-        value, positions, (5, 5)), (x,))
-    print('PASS: spatial neighbours, shuffled order, constants, average gradients')
+        value, positions, (5, 5), local_kernel), (x,))
+    print('PASS:', local_kernel, 'spatial neighbours, shuffled order, constants, average gradients')
 
 
 def check_original():
@@ -61,19 +67,22 @@ def check_original():
     torch.manual_seed(9)
     torch.testing.assert_close(loss_old, new(images)[0], rtol=0, atol=0)
     torch.testing.assert_close(old.forward_feat(images)[0], new.forward_feat(images)[0], rtol=0, atol=0)
+    new.set_method_settings(min_decay=.7, beta=0, local_kernel='gaussian5')
+    torch.testing.assert_close(old.forward_feat(images)[0], new.forward_feat(images)[0], rtol=0, atol=0)
     active = small_model(beta=.5)
     active.load_state_dict(new.state_dict())
     assert sum(p.numel() for p in active.parameters() if p.requires_grad) == sum(
         p.numel() for p in new.parameters() if p.requires_grad)
     # Unit multipliers recover the same architecture with standard shortcuts.
     new.set_method_settings(min_decay=1, beta=0)
-    active.set_method_settings(min_decay=1, beta=.5)
+    active.set_method_settings(min_decay=1, beta=1, local_kernel='gaussian5')
     torch.testing.assert_close(new.forward_feat(images)[0], active.forward_feat(images)[0], rtol=0, atol=0)
     print('PASS: exact beta=0 recovery, unit-multiplier control, unchanged parameters')
 
 
-def check_mask_and_checkpoint():
+def check_mask_and_checkpoint(local_kernel='uniform5'):
     model = small_model(beta=.5)
+    model.set_method_settings(min_decay=.7, beta=.5, local_kernel=local_kernel)
     images = torch.randn(2, 3, 32, 32)
     torch.manual_seed(31)
     encoded = model.forward_encoder(images, .75)
@@ -98,6 +107,7 @@ def check_mask_and_checkpoint():
     saved = torch.load(buffer, weights_only=True)
     restored = small_model()
     restored.set_method_settings(**saved['method_settings'])
+    assert restored.method_settings() == model.method_settings()
     restored.load_state_dict(saved['model'])
     restored.eval()
     torch.testing.assert_close(output, restored.forward_feat(images)[0], rtol=0, atol=0)
@@ -105,12 +115,14 @@ def check_mask_and_checkpoint():
     loss.backward()
     assert torch.isfinite(loss) and all(torch.isfinite(p.grad).all()
                                       for p in model.parameters() if p.grad is not None)
-    print('PASS: hidden patches isolated, CLS, second average, checkpoint round trip, finite backward')
+    print('PASS:', local_kernel, 'hidden patches isolated, CLS, second average, checkpoint round trip, finite backward')
 
 
 if __name__ == '__main__':
     torch.set_num_threads(2)
     torch.manual_seed(0)
     check_average()
+    check_average('gaussian5')
     check_original()
     check_mask_and_checkpoint()
+    check_mask_and_checkpoint('gaussian5')
