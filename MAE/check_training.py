@@ -111,6 +111,21 @@ def main():
     assert 'velocity_train_loss' in (log.root / 'logs/train/velocity.jsonl').read_text()
     assert 'velocity_val_loss' in (log.root / 'logs/validation/velocity.jsonl').read_text()
     print('PASS: conditional loss callback, actual-update hook, constant LR and separate velocity records')
+    from evaluate_features import balanced_indices, linear_probe
+    targets = torch.arange(100).repeat_interleave(3).tolist()
+    assert balanced_indices(targets, 0) == list(range(300))
+    selected = balanced_indices(targets, 2, torch.Generator().manual_seed(12))
+    assert len(set(selected)) == 200 and all(targets[i] == label for label in range(100) for i in selected[2*label:2*label+2])
+    args.probe_epochs, args.probe_batch_size = 2, 4
+    log = RunLog(Path(__file__).resolve().parents[1] / 'runs', args)
+    features, labels = torch.randn(8, 5), torch.arange(8)
+    head = linear_probe(features, labels, features, labels, args, log, 0)
+    log.close('completed')
+    rows = [json.loads(line) for line in (log.root / 'logs/metrics.jsonl').read_text().splitlines()]
+    assert len([row for row in rows if row['event'] == 'linear_probe_update']) == 4
+    saved = torch.load(log.root / 'checkpoints/linear-probe-epoch-0000.pth', weights_only=True)
+    torch.testing.assert_close(head(features), features @ saved['model']['weight'].T + saved['model']['bias'])
+    print('PASS: full-data/balanced selection, configurable probe batches and saved classifier outputs (synthetic)')
 
 
 if __name__ == '__main__':

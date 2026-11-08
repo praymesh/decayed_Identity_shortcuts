@@ -10,8 +10,8 @@ from util.feature_metrics import effective_rank, spatial_energy, knn_accuracy
 
 
 @torch.no_grad()
-def extract(model, dataset, device, seed):
-    loader = DataLoader(dataset, batch_size=2, num_workers=2,
+def extract(model, dataset, device, seed, batch_size=2):
+    loader = DataLoader(dataset, batch_size=batch_size, num_workers=2,
                         generator=torch.Generator().manual_seed(seed))
     features, labels = [], []
     for images, targets in loader:
@@ -20,6 +20,8 @@ def extract(model, dataset, device, seed):
         # Preserve util.misc.eval_model: mean over every final token, including CLS.
         features.append(tokens.float().mean(dim=1).cpu())
         labels.append(targets)
+        if len(features) % 512 == 0:
+            print(f'Extracted {min(len(features)*batch_size, len(dataset))}/{len(dataset)} frozen features', flush=True)
     return torch.cat(features), torch.cat(labels)
 
 
@@ -31,7 +33,7 @@ def linear_probe(train, labels, validation, targets, args, log, epoch,
     for probe_epoch in range(args.probe_epochs):
         order = torch.randperm(len(train))
         total = 0.0
-        for indices in order.split(256):
+        for indices in order.split(getattr(args, 'probe_batch_size', 256)):
             loss = torch.nn.functional.cross_entropy(classifier(train[indices]), labels[indices])
             optimizer.zero_grad()
             loss.backward()
@@ -55,6 +57,21 @@ def linear_probe(train, labels, validation, targets, args, log, epoch,
     torch.save(dict(model=classifier.state_dict(), probe_updates=probe_updates,
                     pooling=pooling),
                log.root / 'checkpoints' / f'linear-probe-epoch-{epoch:04d}.pth')
+    return classifier
+
+
+def balanced_indices(targets, per_class, generator=None):
+    """Zero means the complete training set, in dataset order."""
+    if not per_class:
+        return list(range(len(targets)))
+    indices = []
+    for label in range(100):
+        choices = [i for i, value in enumerate(targets) if value == label]
+        if len(choices) < per_class:
+            raise ValueError(f'Class {label} has fewer than {per_class} images')
+        order = torch.randperm(len(choices), generator=generator)[:per_class].tolist()
+        indices.extend(choices[i] for i in order)
+    return indices
 
 
 @torch.no_grad()
@@ -98,14 +115,14 @@ def evaluate_features(model, transform, device, args, log, epoch):
             torch.manual_seed(args.val_seed)
             train = ImageFolder(args.data_path, transform=transform)
             validation = ImageFolder(args.val_path or str(Path(args.data_path).parent / 'val'), transform=transform)
-            train_indices = []
-            for label in range(100):
-                choices = [i for i, value in enumerate(train.targets) if value == label]
-                order = torch.randperm(len(choices))[:args.feature_train_per_class].tolist()
-                train_indices.extend(choices[i] for i in order)
-            val_indices = torch.linspace(0, len(validation) - 1, min(args.feature_val_samples, len(validation))).long().tolist()
-            train_features, labels = extract(model, Subset(train, train_indices), device, args.val_seed)
-            val_features, targets = extract(model, Subset(validation, val_indices), device, args.val_seed)
+            if train.class_to_idx != validation.class_to_idx or len(train.classes) != 100:
+                raise ValueError('Training and validation must share the same 100-class mapping')
+            train_indices = balanced_indices(train.targets, args.feature_train_per_class)
+            val_count = min(args.feature_val_samples or len(validation), len(validation))
+            val_indices = torch.linspace(0, len(validation) - 1, val_count).long().tolist()
+            batch = getattr(args, 'extraction_batch_size', 2)
+            train_features, labels = extract(model, Subset(train, train_indices), device, args.val_seed, batch)
+            val_features, targets = extract(model, Subset(validation, val_indices), device, args.val_seed, batch)
             cache = log.root / 'feature_cache'
             cache.mkdir(exist_ok=True)
             torch.save(dict(train=train_features, labels=labels, validation=val_features, targets=targets,
@@ -115,7 +132,8 @@ def evaluate_features(model, transform, device, args, log, epoch):
             accuracy = knn_accuracy(train_features, labels, val_features, targets)
             log.record('knn', epoch=epoch, optimizer_updates=args.optimizer_updates,
                        accuracy_percent=accuracy, train_samples=len(labels), samples=len(targets),
-                       k=min(20, len(labels)), temperature=.07, subset=True)
+                       k=min(20, len(labels)), temperature=.07,
+                       subset=len(train_indices) < len(train) or len(val_indices) < len(validation))
             print(f'KNN accuracy: {accuracy:.2f}% ({len(targets)} validation images)')
             depth_indices = torch.linspace(0, len(val_indices) - 1, min(200, len(val_indices))).long().tolist()
             measure_depth(model, Subset(validation, [val_indices[i] for i in depth_indices]), device, args, log, epoch)

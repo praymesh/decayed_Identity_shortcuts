@@ -16,6 +16,8 @@ def plot_run(root):
     method = settings.get('method', {})
     dataset = settings.get('dataset', {}).get('kind', 'unknown data')
     title = f'{root.name}\n{dataset}, a_min={method.get("min_decay", method.get("min_sigma"))}, beta={method.get("beta")}'
+    if 'noise_time' in settings['settings']:
+        title += f", block={settings['settings']['layer']}, t={settings['settings']['noise_time']}"
     curves = root / 'curves'
     curves.mkdir(exist_ok=True)
 
@@ -44,6 +46,8 @@ def plot_run(root):
         ('classifier_loss', 'Probe training', 'linear_probe', 'probe_epoch')], 'Probe epoch')
     plot('linear_probe_accuracy.png', 'Validation accuracy (%)', [
         ('accuracy_percent', 'Linear probe', 'linear_probe_validation', 'probe_epoch')], 'Probe epoch')
+    plot('linear_probe_learning_rate.png', 'Classifier learning rate', [
+        ('lr', 'Linear probe', 'linear_probe_update', 'probe_updates')], 'Classifier optimizer updates')
     plot('knn_accuracy.png', 'Validation accuracy (%)', [
         ('accuracy_percent', 'KNN', 'knn', 'optimizer_updates')])
     for key, label in [('effective_rank', 'Covariance singular-value entropy'),

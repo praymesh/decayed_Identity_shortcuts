@@ -1,3 +1,16 @@
+For the local ImageNet-100 comparison, evaluate a saved checkpoint from the repo root:
+
+```bash
+python MAE/evaluate_checkpoint.py --checkpoint PATH/checkpoint-last.pth --output-dir runs/full_probe
+```
+
+Defaults use all 126689 training and 5000 validation images, fixed crops, the
+repository's mean-token pooling including CLS, and a 200-epoch CPU linear probe
+with batch 1024. The backbone stays frozen. Small extraction batches use a 7 GiB
+allocator cap. Every invocation creates a separate run with settings, logs,
+feature caches, classifier weights and curves. These ignored outputs need backup.
+`--train-per-class` and `--val-samples` are diagnostic limits; zero means all.
+
 We conducted our experiments using the original MAE codebase, modifying only the model architecture to incorporate our decayed residual connections and additional skip-connections.
 
 Follow the setup instructions in the original MAE codebase (shown below).
