@@ -78,6 +78,33 @@ def main():
     torch.testing.assert_close(output, (inputs * .18215).flatten(2).transpose(1, 2))
     assert not adapter.feature_has_cls
     print('PASS: feature extraction uses clean t=1, null labels and all patch tokens')
+    from feature_eval import extract_layers
+    from torch.utils.data import TensorDataset
+    class LayerModel(RecordingModel):
+        def __init__(self):
+            super().__init__()
+            self.anchor = torch.nn.Parameter(torch.zeros(1), requires_grad=False)
+            self.enc_blocks = torch.nn.ModuleList([torch.nn.Identity() for _ in range(2)])
+            self.dec_blocks = torch.nn.ModuleList([torch.nn.Identity() for _ in range(2)])
+        def forward_tokens(self, values, times, labels):
+            assert torch.equal(labels, torch.full_like(labels, 100))
+            tokens = values.flatten(2).transpose(1, 2)
+            for block in list(self.enc_blocks)+list(self.dec_blocks):
+                tokens = block(tokens)
+            return tokens, None
+    moments = torch.randn(3, 8, 2, 2)
+    dataset = TensorDataset(moments, torch.tensor([0, 99, 42]))
+    model = LayerModel().eval()
+    rng = torch.get_rng_state().clone()
+    first = extract_layers(model, dataset, [0, 2], [1, 4], .5, 17)
+    second = extract_layers(model, dataset, [0, 2], [1, 4], .5, 17)
+    torch.testing.assert_close(first, second, rtol=0, atol=0)
+    assert torch.equal(rng, torch.get_rng_state())
+    clean = extract_layers(model, dataset, [0, 2], [4], 1., 17)
+    expected = (moments[[0, 2], :4]*.18215).flatten(2).mean(2)
+    torch.testing.assert_close(clean[:, 0], expected)
+    assert not model.enc_blocks[0]._forward_hooks
+    print('PASS: layer collection, fixed noise, clean endpoint, null labels, RNG preservation and hook removal')
 
 
 if __name__ == '__main__':

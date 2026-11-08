@@ -32,6 +32,21 @@ subsets match the MAE subset sizes; no FID or full-paper reproduction is claimed
 Rank uses mean patch tokens because SiT has no CLS. Feature caches and depth
 metrics are saved separately. A capped H200 run still needs real RTX 3070 checks.
 
+`probe_layers.py` audits blocks 3, 6, 9 and 12 at interpolant times 1, .75, .5
+and .25 (1 is clean in this code). It uses cached posterior means, fixed noise
+and null class conditioning. Each 200-epoch CPU probe fits 1000 training images
+and selects on 500 disjoint training images. The standard control chooses one
+shared layer/time for all methods before testing on all 5000 validation images.
+Every candidate keeps separate logs, curves and classifier weights. This remains
+a small-label feature audit, and does not measure generation quality or FID.
+
+Queue the full-data MAE probes followed by the SiT audit from the repo root:
+
+```bash
+python MAE/queue_evaluations.py --mae-queue PATH/MAE_QUEUE \
+  --sit-queue PATH/SIT_QUEUE --output-dir runs/checkpoint_evaluation
+```
+
 Small checks: `python SiT/check_shortcuts.py`. Local resume uses `--ckpt PATH`,
 restores EMA/model/optimizer/scaler, RNG and update counters, and creates a new run
 folder. Data, posteriors and outputs are ignored by Git and need separate backups.
