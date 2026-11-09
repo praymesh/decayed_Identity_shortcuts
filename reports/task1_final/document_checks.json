@@ -1,0 +1,10 @@
+{
+  "file": "/home/jovyan/Task_1_Report.docx",
+  "bytes": 948811,
+  "pages_rendered": 13,
+  "embedded_figures": 9,
+  "tables": 10,
+  "class_mapping_rows": 100,
+  "sha256": "1a483c620bba1a42638653340c371cda2958e7bc1f634ec9298ebd54ea8b3468",
+  "checks": "DOCX ZIP, render, page flow, class table, key scores, em/en dash absence, command formatting and identical repository copy passed"
+}
