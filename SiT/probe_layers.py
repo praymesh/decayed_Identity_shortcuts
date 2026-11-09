@@ -58,7 +58,7 @@ def main():
                           backbone_frozen=True, weights='EMA', pooling='Mean patch tokens; null class; cached posterior means',
                           fit_indices=[indices[i] for i in fit], selection_indices=[indices[i] for i in holdout],
                           selection_split='500 held-out training images; disjoint from 1000 probe-fit images',
-                          precision='bf16_feature_autocast; fp32_CPU_classifier')
+                          precision=f'{torch.get_autocast_dtype("cuda")}_feature_autocast; fp32_CPU_classifier')
         cache = log.root/'feature_cache'; cache.mkdir()
         rows = []
         for time in args.times:

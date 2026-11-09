@@ -54,7 +54,7 @@ def main():
         log.save_metadata(settings=vars(args), method=model.method_settings(),
                           dataset=dict(kind='ImageNet-100 frozen probe', **dataset),
                           source_checkpoint=args.resume, backbone_frozen=True,
-                          precision='bf16_feature_autocast; fp32_CPU_classifier',
+                          precision=f'{torch.get_autocast_dtype("cuda")}_feature_autocast; fp32_CPU_classifier',
                           evaluation_subset=bool(options.train_per_class or options.val_samples),
                           pooling='Mean final raw tokens INCLUDING CLS; unchanged repository protocol')
         transform = transforms.Compose([transforms.Resize(256, interpolation=3),
