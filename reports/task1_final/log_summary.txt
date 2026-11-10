@@ -1,0 +1,90 @@
+Task 1: final training and evaluation log summary
+Prepared 10 November 2026 from the recorded metrics.jsonl files.
+
+Scope: the five final MAE runs and three final SiT runs used in Task_1_Report.docx.
+Pilot, benchmark and superseded subset runs are omitted. Raw logs stay local.
+
+MAE final results (full 126,689-image training split; 5,000 validation images)
+Method                   Val loss   Linear %      KNN %    Updates   Skipped
+Standard                 0.409020      66.92      51.24      98967        33
+Fixed decay              0.410559      72.02      59.90      98967        33
+Uniform beta=0.5         0.412325      73.70      65.74      98967        33
+Uniform beta=1           0.415199      65.28      50.40      98965        35
+Gaussian beta=0.5        0.409581      75.66      65.98      98965        35
+
+SiT final results (1,000 training features; all 5,000 validation images)
+Shared extraction setting: layer 9, time 0.75.
+Method                   Val loss   Linear %      KNN %    Updates   Skipped
+Standard                 0.853590      18.40      13.10      98963        37
+Fixed decay              0.851626      17.22      11.70      98966        34
+Uniform beta=0.5         0.850967      20.74      13.86      98963        37
+
+Log verification
+All eight final training runs completed 200 epochs, 40 validation passes,
+and 99,000 attempted optimizer updates. FP16 scaling skipped the counts above.
+Training and evaluation completion, finite epoch/validation losses, update counts,
+and final accuracies were checked directly against the recorded logs.
+Final accuracy values above agree with the report CSVs to within 0.0001 points.
+
+MAE / Standard: training completed; evaluation completed.
+  Training: runs/queue-20261101T171631Z-48377cd5/standard/20261101T171633Z-b3991787/logs/metrics.jsonl
+  SHA-256: 2cab821fcad78d11b7e6e0b6736849dc2f64410254ebf15b98187bfe31c342d3
+  Evaluation: runs/checkpoint_evaluation/queue-20261108T114441Z-f373235f/MAE/standard/20261108T114444Z-dea1979d/logs/metrics.jsonl
+  SHA-256: 6676eb419094fc6f81ab661d51827788b9ef02cf1d47fda0add76b7306dc4ab3
+
+MAE / Fixed decay: training completed; evaluation completed.
+  Training: runs/queue-20261101T171631Z-48377cd5/fixed_decay/20261101T235452Z-ca9d19b2/logs/metrics.jsonl
+  SHA-256: d7fdc3f0c69892f49c2ceec8594503f3b6df9b70ba60cfd252c970f9f5554f1d
+  Evaluation: runs/checkpoint_evaluation/queue-20261108T114441Z-f373235f/MAE/fixed_decay/20261108T115032Z-c2942eda/logs/metrics.jsonl
+  SHA-256: d54588853b34611cd7b4da030276ee213b08aba85522eea8bc657c539d3c1af9
+
+MAE / Uniform beta=0.5: training completed; evaluation completed.
+  Training: runs/queue-20261101T171631Z-48377cd5/frequency_selective/20261102T063902Z-a3525f08/logs/metrics.jsonl
+  SHA-256: 6b02febb1a9cc4dc3e7df257ceb4083de99936ac8f178b255c2dae7012c8166f
+  Evaluation: runs/checkpoint_evaluation/queue-20261108T114441Z-f373235f/MAE/frequency_selective/20261108T115513Z-558fa2d8/logs/metrics.jsonl
+  SHA-256: c19cb754714725894b578906040b3b332a5fd6f3443989274efd6a5e040fb0d6
+
+MAE / Uniform beta=1: training completed; evaluation completed.
+  Training: runs/mae_ablations/queue-20261108T121117Z-8c54e9e2/beta1_uniform/20261108T121120Z-fa358718/logs/metrics.jsonl
+  SHA-256: bc28dfc1671a8a802e3fa508df5f2aaa275904b42e0f5b7bb6ed7c5d00b08371
+  Evaluation: runs/mae_ablations/queue-20261108T121117Z-8c54e9e2/beta1_uniform/20261108T121120Z-fa358718/logs/metrics.jsonl
+  SHA-256: bc28dfc1671a8a802e3fa508df5f2aaa275904b42e0f5b7bb6ed7c5d00b08371
+
+MAE / Gaussian beta=0.5: training completed; evaluation completed.
+  Training: runs/mae_ablations/queue-20261108T121117Z-8c54e9e2/beta05_gaussian/20261108T214600Z-e2756d13/logs/metrics.jsonl
+  SHA-256: 559cd45506110f451f2ee8012af44f3c59796946b52119d45a52d7d1861c8197
+  Evaluation: runs/mae_ablations/queue-20261108T121117Z-8c54e9e2/beta05_gaussian/20261108T214600Z-e2756d13/logs/metrics.jsonl
+  SHA-256: 559cd45506110f451f2ee8012af44f3c59796946b52119d45a52d7d1861c8197
+
+SIT / Standard: training completed; evaluation completed.
+  Training: runs/sit/queue-20261105T184038Z-ad8937e7/standard/20261105T184043Z-a9efe8bb/logs/metrics.jsonl
+  SHA-256: acd737510a992bd8f292a7a6009e6e5956cc860b3c4836898ae2eb691361b8e2
+  Evaluation: runs/checkpoint_evaluation/queue-20261108T114441Z-f373235f/SiT/standard/20261108T115956Z-a94edb20/logs/metrics.jsonl
+  SHA-256: de39f60338a98f7d7e51226be173b0e0f2dad4da4198d8e86c9730961db3dff8
+
+SIT / Fixed decay: training completed; evaluation completed.
+  Training: runs/sit/queue-20261105T184038Z-ad8937e7/fixed_decay/20261105T213907Z-31dc4fa2/logs/metrics.jsonl
+  SHA-256: ff22e16d9ceb5c6917d1e9f32a3bb47f021cd5e38cde13b0d3cbe0202c54ad57
+  Evaluation: runs/checkpoint_evaluation/queue-20261108T114441Z-f373235f/SiT/fixed_decay/20261108T120032Z-3b232618/logs/metrics.jsonl
+  SHA-256: 6d1459622d227be2d164208bff8ffd88d361dbce184193149ffb562e7690d1f8
+
+SIT / Uniform beta=0.5: training completed; evaluation completed.
+  Training: runs/sit/queue-20261105T184038Z-ad8937e7/frequency_selective/20261106T003639Z-a5f94717/logs/metrics.jsonl
+  SHA-256: 2b9019a9375d15da1a86f1beed09a9c31d2e3509c8b48e2d9b1fc98e2f69a22e
+  Evaluation: runs/checkpoint_evaluation/queue-20261108T114441Z-f373235f/SiT/frequency_selective/20261108T120107Z-2a8a463f/logs/metrics.jsonl
+  SHA-256: 31d34742a76913615d3fa53f723b8bcbae92151538ddabf38ec1363dcd51f9f2
+
+Interpretation and recorded limitations
+Gaussian beta=0.5 has the best observed MAE accuracy (75.66% linear, 65.98% KNN).
+Uniform beta=1 lowers MAE classification accuracy despite stronger smoothing.
+SiT results concern features only; generation quality was not established.
+Each variant uses one training seed. Runs used an H200 with a 7 GiB allocator cap;
+execution on a physical RTX 3070 remains unverified.
+Some historical extraction metadata says BF16; actual default CUDA autocast was
+FP16, as documented in audit.json. Recorded scores are unchanged.
+Earlier reports/task1_200ep/ uses subset probes; task1_final/ is authoritative.
+
+Included in Git: source, configs, requirements, reports, figures and this summary.
+Excluded: raw runs/logs, environments, datasets, checkpoints, weights and caches.
+Source log paths and hashes identify local provenance; raw logs are not bundled.
+See README.txt, audit.json, commands.txt and the CSVs for report provenance.
